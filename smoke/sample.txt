@@ -1,0 +1,7 @@
+﻿Chapter 1
+
+This is a short smoke test chapter for the audiobook pipeline. It should be long enough to exercise cleanup, chapter detection, and Kokoro speech generation without taking forever.
+
+Chapter 2
+
+This follow-up chapter verifies that per-chapter rendering works and that the command can stitch final MP3 output after speech synthesis completes.

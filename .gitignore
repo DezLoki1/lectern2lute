@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+projects/
+*.wav
+*.mp3
+smoke/*.pdf
+smoke/projects*/
+voice samples/
+voice samples.md

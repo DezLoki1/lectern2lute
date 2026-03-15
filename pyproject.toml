@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "book2audio"
+version = "0.1.0"
+description = "Local audiobook pipeline for PDF, EPUB, TXT, and Markdown sources."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "ebooklib>=0.18",
+    "PyMuPDF>=1.24",
+    "rich>=13.7",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+]
+kokoro = [
+    "kokoro>=0.9.4",
+    "numpy>=1.26",
+    "soundfile>=0.12",
+]
+
+[project.scripts]
+book2audio = "book2audio.cli:main"
+book2audio-gui = "book2audio.gui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

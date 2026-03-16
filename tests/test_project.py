@@ -3,7 +3,14 @@ import unittest
 from pathlib import Path
 
 from book2audio.pipeline import ingest_book
-from book2audio.project import load_manifest, update_chapter_clean_text
+from book2audio.project import (
+    delete_chapter,
+    load_manifest,
+    merge_chapters,
+    rename_chapter_title,
+    split_chapter,
+    update_chapter_clean_text,
+)
 
 
 class ProjectTests(unittest.TestCase):
@@ -57,6 +64,55 @@ class ProjectTests(unittest.TestCase):
             self.assertFalse(stale_chapter.exists())
             self.assertFalse(stale_sample.exists())
             self.assertFalse(stale_render.exists())
+
+    def test_rename_delete_merge_and_split_chapters_rewrite_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            source = tmp_path / "book.txt"
+            source.write_text(
+                "Chapter 1\n\nFirst chapter text has enough words to support the structure editing tests.\n\n"
+                "Chapter 2\n\nHeading Two\n\nSecond chapter text also has enough words to survive a split.\n\n"
+                "Chapter 3\n\nThird chapter text is here so merge and delete have something to work with.",
+                encoding="utf-8",
+            )
+
+            project_dir, _manifest = ingest_book(source, tmp_path / "projects")
+
+            renamed_manifest = rename_chapter_title(project_dir, 2, "Renamed Middle")
+            self.assertEqual(renamed_manifest.chapters[1].title, "Renamed Middle")
+
+            update_chapter_clean_text(
+                project_dir,
+                2,
+                "Renamed Middle\n\nLead-in text before the inserted break.\n\n"
+                "Heading Two\n\nSecond chapter text also has enough words to survive a split.",
+            )
+            split_manifest = split_chapter(
+                project_dir,
+                2,
+                cursor_offset=len("Renamed Middle\n\nLead-in text before the inserted break.\n\n"),
+                new_title="Inserted Split",
+            )
+            self.assertEqual(
+                [chapter.title for chapter in split_manifest.chapters],
+                ["Chapter 1", "Renamed Middle", "Inserted Split", "Chapter 3"],
+            )
+            split_text = (project_dir / split_manifest.chapters[2].clean_text_path).read_text(encoding="utf-8")
+            self.assertIn("Heading Two", split_text)
+
+            merged_manifest = merge_chapters(project_dir, 3, direction="previous")
+            self.assertEqual(
+                [chapter.title for chapter in merged_manifest.chapters],
+                ["Chapter 1", "Renamed Middle", "Chapter 3"],
+            )
+            merged_text = (project_dir / merged_manifest.chapters[1].clean_text_path).read_text(encoding="utf-8")
+            self.assertIn("Heading Two", merged_text)
+            self.assertIn("Second chapter text", merged_text)
+
+            deleted_manifest = delete_chapter(project_dir, 2)
+            self.assertEqual([chapter.title for chapter in deleted_manifest.chapters], ["Chapter 1", "Chapter 3"])
+            self.assertFalse((project_dir / "renders").exists())
+            self.assertFalse((project_dir / "samples").exists())
 
 
 if __name__ == "__main__":

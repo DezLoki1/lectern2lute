@@ -10,13 +10,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from book2audio.audio import AudioPlayerError, build_audio_player
 from book2audio.models import ChapterRecord, ProjectManifest
 from book2audio.pipeline import ensure_project
-from book2audio.project import load_manifest, update_chapter_clean_text
+from book2audio.project import (
+    delete_chapter,
+    load_manifest,
+    merge_chapters,
+    rename_chapter_title,
+    split_chapter,
+    update_chapter_clean_text,
+)
 from book2audio.render import render_project, render_sample
 from book2audio.tts import build_backend
 from book2audio.voices import (
@@ -341,10 +348,27 @@ class Book2AudioGUI:
 
         editor_toolbar = ttk.Frame(right)
         editor_toolbar.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        for column in range(4):
+            editor_toolbar.columnconfigure(column, weight=1)
         self.save_edits_button = ttk.Button(editor_toolbar, text="Save Edits", command=self._save_current_chapter)
-        self.save_edits_button.grid(row=0, column=0, sticky="w")
+        self.save_edits_button.grid(row=0, column=0, sticky="ew")
         self.revert_edits_button = ttk.Button(editor_toolbar, text="Revert Chapter", command=self._revert_current_chapter)
-        self.revert_edits_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.revert_edits_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.rename_title_button = ttk.Button(editor_toolbar, text="Rename Title", command=self._rename_current_chapter)
+        self.rename_title_button.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        self.split_chapter_button = ttk.Button(editor_toolbar, text="Split at Cursor", command=self._split_current_chapter)
+        self.split_chapter_button.grid(row=0, column=3, sticky="ew", padx=(8, 0))
+
+        self.merge_up_button = ttk.Button(editor_toolbar, text="Merge Up", command=self._merge_with_previous)
+        self.merge_up_button.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.merge_down_button = ttk.Button(editor_toolbar, text="Merge Down", command=self._merge_with_next)
+        self.merge_down_button.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.delete_chapter_button = ttk.Button(
+            editor_toolbar,
+            text="Delete Chapter",
+            command=self._delete_current_chapter,
+        )
+        self.delete_chapter_button.grid(row=1, column=2, sticky="ew", padx=(8, 0), pady=(8, 0))
 
         content_split = ttk.Panedwindow(right, orient=tk.HORIZONTAL)
         content_split.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
@@ -882,6 +906,141 @@ class Book2AudioGUI:
         self.status_var.set("Reloaded the last saved cleaned chapter text.")
         self._queue_log(f"Reloaded chapter {self.active_chapter_index} from disk.")
 
+    def _rename_current_chapter(self) -> None:
+        chapter = self._current_chapter_record()
+        if chapter is None:
+            messagebox.showinfo("No Chapter", "Prepare a project and select a chapter first.", parent=self.root)
+            return
+        if not self._ensure_ready_for_structure_edit("renaming the chapter title"):
+            return
+
+        new_title = simpledialog.askstring(
+            "Rename Chapter",
+            "New chapter title:",
+            initialvalue=chapter.title,
+            parent=self.root,
+        )
+        if new_title is None:
+            return
+
+        updated_manifest = rename_chapter_title(self.project_dir, chapter.index, new_title)  # type: ignore[arg-type]
+        self._apply_project(self.project_dir, updated_manifest, selected_chapter_index=chapter.index)  # type: ignore[arg-type]
+        self.status_var.set(f"Renamed chapter {chapter.index}.")
+        self._queue_log(f"Renamed chapter {chapter.index} to {new_title.strip() or chapter.title}.")
+
+    def _split_current_chapter(self) -> None:
+        chapter = self._current_chapter_record()
+        if chapter is None:
+            messagebox.showinfo("No Chapter", "Prepare a project and select a chapter first.", parent=self.root)
+            return
+        if not self._ensure_ready_for_structure_edit("splitting the chapter", require_saved=True):
+            return
+
+        editor_text = self.editor_text.get("1.0", "end-1c")
+        cursor_offset = self._current_split_offset()
+        suggested_title = self._suggest_split_title(editor_text, cursor_offset, f"{chapter.title} (Part 2)")
+        new_title = simpledialog.askstring(
+            "Split Chapter",
+            "Title for the new chapter created after the cursor:",
+            initialvalue=suggested_title,
+            parent=self.root,
+        )
+        if new_title is None:
+            return
+
+        try:
+            updated_manifest = split_chapter(
+                self.project_dir,  # type: ignore[arg-type]
+                chapter.index,
+                cursor_offset,
+                new_title=new_title,
+            )
+        except ValueError as exc:
+            messagebox.showerror("Split Failed", str(exc), parent=self.root)
+            return
+
+        next_index = min(chapter.index + 1, len(updated_manifest.chapters))
+        self._apply_project(self.project_dir, updated_manifest, selected_chapter_index=next_index)  # type: ignore[arg-type]
+        self.status_var.set(f"Split chapter {chapter.index} at the cursor.")
+        self._queue_log(f"Split chapter {chapter.index}; new chapter selected at index {next_index}.")
+
+    def _merge_with_previous(self) -> None:
+        chapter = self._current_chapter_record()
+        if chapter is None:
+            messagebox.showinfo("No Chapter", "Prepare a project and select a chapter first.", parent=self.root)
+            return
+        if chapter.index <= 1:
+            messagebox.showinfo("Cannot Merge", "The first chapter cannot be merged upward.", parent=self.root)
+            return
+        if not self._ensure_ready_for_structure_edit("merging with the previous chapter"):
+            return
+
+        confirmed = messagebox.askyesno(
+            "Merge Up",
+            "Merge the selected chapter into the previous chapter?\n\n"
+            "This clears any generated samples or renders for the project.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+
+        updated_manifest = merge_chapters(self.project_dir, chapter.index, direction="previous")  # type: ignore[arg-type]
+        selected_index = max(1, chapter.index - 1)
+        self._apply_project(self.project_dir, updated_manifest, selected_chapter_index=selected_index)  # type: ignore[arg-type]
+        self.status_var.set(f"Merged chapter {chapter.index} into chapter {selected_index}.")
+        self._queue_log(f"Merged chapter {chapter.index} upward into chapter {selected_index}.")
+
+    def _merge_with_next(self) -> None:
+        chapter = self._current_chapter_record()
+        if chapter is None:
+            messagebox.showinfo("No Chapter", "Prepare a project and select a chapter first.", parent=self.root)
+            return
+        if chapter.index >= len(self.chapter_records):
+            messagebox.showinfo("Cannot Merge", "The last chapter cannot be merged downward.", parent=self.root)
+            return
+        if not self._ensure_ready_for_structure_edit("merging with the next chapter"):
+            return
+
+        confirmed = messagebox.askyesno(
+            "Merge Down",
+            "Merge the selected chapter with the next chapter?\n\n"
+            "This clears any generated samples or renders for the project.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+
+        updated_manifest = merge_chapters(self.project_dir, chapter.index, direction="next")  # type: ignore[arg-type]
+        self._apply_project(self.project_dir, updated_manifest, selected_chapter_index=chapter.index)  # type: ignore[arg-type]
+        self.status_var.set(f"Merged chapter {chapter.index} with the following chapter.")
+        self._queue_log(f"Merged chapter {chapter.index} downward into chapter {chapter.index + 1}.")
+
+    def _delete_current_chapter(self) -> None:
+        chapter = self._current_chapter_record()
+        if chapter is None:
+            messagebox.showinfo("No Chapter", "Prepare a project and select a chapter first.", parent=self.root)
+            return
+        if len(self.chapter_records) <= 1:
+            messagebox.showinfo("Cannot Delete", "The only chapter in a project cannot be deleted.", parent=self.root)
+            return
+        if not self._ensure_ready_for_structure_edit("deleting the chapter"):
+            return
+
+        confirmed = messagebox.askyesno(
+            "Delete Chapter",
+            f"Delete chapter {chapter.index}: {chapter.title}?\n\n"
+            "This clears any generated samples or renders for the project.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+
+        updated_manifest = delete_chapter(self.project_dir, chapter.index)  # type: ignore[arg-type]
+        selected_index = min(chapter.index, len(updated_manifest.chapters))
+        self._apply_project(self.project_dir, updated_manifest, selected_chapter_index=selected_index)  # type: ignore[arg-type]
+        self.status_var.set(f"Deleted chapter {chapter.index}.")
+        self._queue_log(f"Deleted chapter {chapter.index}: {chapter.title}.")
+
     def _ensure_safe_to_continue(self, action: str) -> bool:
         if not self.editor_dirty:
             return True
@@ -896,6 +1055,45 @@ class Book2AudioGUI:
         if choice:
             return self._save_current_chapter(show_message=False)
         return True
+
+    def _ensure_ready_for_structure_edit(self, action: str, *, require_saved: bool = False) -> bool:
+        if self.project_dir is None or self.active_chapter_index is None:
+            return False
+        if not self.editor_dirty:
+            return True
+        if not require_saved:
+            return self._ensure_safe_to_continue(action)
+
+        choice = messagebox.askyesnocancel(
+            "Unsaved Changes",
+            f"Save the current chapter edits before {action}?\n\n"
+            "Splitting uses the current editor text, so saving first is recommended.",
+            parent=self.root,
+        )
+        if choice is None or not choice:
+            return False
+        return self._save_current_chapter(show_message=False)
+
+    def _current_chapter_record(self) -> ChapterRecord | None:
+        if self.active_chapter_index is None:
+            return None
+        return next((item for item in self.chapter_records if item.index == self.active_chapter_index), None)
+
+    def _current_split_offset(self) -> int:
+        selection = self.editor_text.tag_ranges(tk.SEL)
+        index = selection[0] if selection else self.editor_text.index(tk.INSERT)
+        return len(self.editor_text.get("1.0", index))
+
+    def _suggest_split_title(self, text: str, cursor_offset: int, fallback: str) -> str:
+        remaining = text[cursor_offset:].lstrip()
+        for line in remaining.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if len(stripped) <= 80 and len(stripped.split()) <= 8 and stripped[-1:] not in ".!?;:":
+                return stripped
+            break
+        return fallback
 
     def _selected_voice_id(self) -> str:
         selected_label = self.voice_display_var.get().strip()
@@ -1039,6 +1237,11 @@ class Book2AudioGUI:
         self.open_project_button.configure(state=state)
         self.save_edits_button.configure(state=state)
         self.revert_edits_button.configure(state=state)
+        self.rename_title_button.configure(state=state)
+        self.split_chapter_button.configure(state=state)
+        self.merge_up_button.configure(state=state)
+        self.merge_down_button.configure(state=state)
+        self.delete_chapter_button.configure(state=state)
         self.overwrite_check.configure(state=state)
         self.chapter_listbox.configure(state=state)
         self.editor_text.configure(state=state)

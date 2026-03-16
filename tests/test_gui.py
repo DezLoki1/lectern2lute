@@ -45,6 +45,11 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(app.render_sample_button.cget("text"), "Generate Sample")
             self.assertEqual(app.render_chapter_button.cget("text"), "Render Selected Chapter")
             self.assertEqual(app.render_full_button.cget("text"), "Convert Full Book")
+            self.assertEqual(app.rename_title_button.cget("text"), "Rename Title")
+            self.assertEqual(app.split_chapter_button.cget("text"), "Split at Cursor")
+            self.assertEqual(app.merge_up_button.cget("text"), "Merge Up")
+            self.assertEqual(app.merge_down_button.cget("text"), "Merge Down")
+            self.assertEqual(app.delete_chapter_button.cget("text"), "Delete Chapter")
         finally:
             root.destroy()
 

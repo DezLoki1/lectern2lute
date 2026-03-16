@@ -6,13 +6,68 @@ from book2audio.cleanup import clean_text_for_tts, normalize_text, normalize_tit
 from book2audio.models import ChapterDraft, ParsedDocument, SourceSection
 from book2audio.utils import slugify, word_count
 
+NUMBER_DESIGNATOR_PATTERN = (
+    r"(?:\d+|[ivxlcdm]+|[a-z]|"
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|"
+    r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+    r"eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|"
+    r"seventeenth|eighteenth|nineteenth|twentieth)"
+)
 CHAPTER_HEADING_RE = re.compile(
-    r"^(?:"
-    r"chapter|part|book|prologue|epilogue|foreword|afterword|appendix"
-    r")\b(?:[\s:.-]+[a-z0-9ivxlcdm-]+.*)?$",
+    rf"^chapter\b(?:[\s:.-]+{NUMBER_DESIGNATOR_PATTERN})?(?:[\s:.-]+.*)?$",
     re.IGNORECASE,
 )
+PART_HEADING_RE = re.compile(
+    rf"^(?:part|book|section)\b(?:[\s:.-]+{NUMBER_DESIGNATOR_PATTERN})(?:[\s:.-]+.*)?$",
+    re.IGNORECASE,
+)
+SPECIAL_HEADING_RE = re.compile(
+    r"^(?:prologue|epilogue|foreword|afterword|interlude)\b(?:[\s:.-]+.*)?$",
+    re.IGNORECASE,
+)
+APPENDIX_HEADING_RE = re.compile(
+    rf"^appendix\b(?:[\s:.-]+{NUMBER_DESIGNATOR_PATTERN})?(?:[\s:.-]+.*)?$",
+    re.IGNORECASE,
+)
+MONTH_PATTERN = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+WEEKDAY_PATTERN = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+NUMBER_WORD_PATTERN = (
+    r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|few|several)"
+)
+DATE_HEADING_RE = re.compile(
+    rf"^(?:"
+    rf"{MONTH_PATTERN}\s+\d{{1,2}}(?:,\s*\d{{4}})?|"
+    rf"\d{{1,2}}\s+{MONTH_PATTERN}(?:\s+\d{{4}})?|"
+    rf"{MONTH_PATTERN}\s+\d{{4}}|"
+    rf"{WEEKDAY_PATTERN}(?:,\s+{MONTH_PATTERN}\s+\d{{1,2}}(?:,\s*\d{{4}})?)?|"
+    rf"(?:18|19|20)\d{{2}}"
+    rf")$",
+    re.IGNORECASE,
+)
+TIMELINE_HEADING_RE = re.compile(
+    rf"^(?:"
+    rf"present\s+day|"
+    rf"(?:the\s+)?(?:next|following|same|that|this)\s+"
+    rf"(?:day|week|month|year|morning|afternoon|evening|night)|"
+    rf"(?:{NUMBER_WORD_PATTERN}|\d+)\s+"
+    rf"(?:day|days|week|weeks|month|months|year|years|hour|hours|minute|minutes)\s+"
+    rf"(?:earlier|later|before|after)|"
+    rf"(?:earlier|later)\s+(?:that|this|the)\s+"
+    rf"(?:day|week|month|year|morning|afternoon|evening|night)"
+    rf")$",
+    re.IGNORECASE,
+)
+ROMAN_NUMERAL_RE = re.compile(r"^[ivxlcdm]+$", re.IGNORECASE)
 SKIP_SECTION_TITLES = {"contents", "table of contents"}
+DATE_OR_TIMELINE_MIN_FOLLOWING_WORDS = 8
+CONTEXTUAL_HEADING_MIN_FOLLOWING_WORDS = 12
 
 
 def build_chapters(document: ParsedDocument) -> list[ChapterDraft]:
@@ -36,6 +91,8 @@ def build_chapters(document: ParsedDocument) -> list[ChapterDraft]:
         combined = "\n\n".join(section.text for section in normalized_sections).strip()
         drafts = _fallback_chunks(combined)
 
+    drafts = _trim_trailing_part_heading_artifacts(drafts)
+
     return [
         ChapterDraft(
             index=index,
@@ -54,7 +111,9 @@ def is_chapter_heading(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
-    return bool(CHAPTER_HEADING_RE.match(stripped))
+    if _matches_explicit_heading(stripped):
+        return True
+    return _looks_like_contextual_heading(stripped)
 
 
 def _looks_structured(document: ParsedDocument, sections: list[SourceSection]) -> bool:
@@ -120,13 +179,13 @@ def _chapters_from_combined_text(text: str) -> list[ChapterDraft]:
     current_lines: list[str] = []
     current_title: str | None = None
 
-    for line in lines:
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
             current_lines.append("")
             continue
 
-        if is_chapter_heading(stripped):
+        if _is_heading_at_line(lines, index):
             if current_lines:
                 _flush_chapter(drafts, current_lines, current_title)
                 current_lines = []
@@ -140,6 +199,179 @@ def _chapters_from_combined_text(text: str) -> list[ChapterDraft]:
         _flush_chapter(drafts, current_lines, current_title)
 
     return [draft for draft in drafts if draft.raw_text.strip()]
+
+
+def _is_heading_at_line(lines: list[str], index: int) -> bool:
+    stripped = lines[index].strip()
+    if not stripped:
+        return False
+    if _matches_explicit_heading(stripped):
+        return True
+    return _looks_like_contextual_heading(
+        stripped,
+        previous_line=lines[index - 1] if index > 0 else None,
+        next_line=lines[index + 1] if index + 1 < len(lines) else None,
+        following_lines=lines[index + 1 :],
+    )
+
+
+def _looks_like_contextual_heading(
+    line: str,
+    previous_line: str | None = None,
+    next_line: str | None = None,
+    following_lines: list[str] | None = None,
+) -> bool:
+    stripped = line.strip()
+    following_word_count = _lookahead_word_count(following_lines or [])
+
+    if DATE_HEADING_RE.match(stripped):
+        return following_word_count >= DATE_OR_TIMELINE_MIN_FOLLOWING_WORDS
+    if TIMELINE_HEADING_RE.match(stripped):
+        return following_word_count >= DATE_OR_TIMELINE_MIN_FOLLOWING_WORDS
+
+    if following_word_count < CONTEXTUAL_HEADING_MIN_FOLLOWING_WORDS:
+        return False
+    if not _has_heading_spacing_context(previous_line, next_line):
+        return False
+    return _looks_like_short_heading_with_date_or_time_cues(stripped)
+
+
+def _trim_trailing_part_heading_artifacts(drafts: list[ChapterDraft]) -> list[ChapterDraft]:
+    trim_index = len(drafts)
+    while trim_index > 0 and _is_trailing_part_heading_artifact(drafts[trim_index - 1]):
+        trim_index -= 1
+
+    if len(drafts) - trim_index >= 2:
+        return drafts[:trim_index]
+
+    return drafts
+
+
+def _is_trailing_part_heading_artifact(draft: ChapterDraft) -> bool:
+    stripped = draft.raw_text.strip()
+    title = draft.title.strip()
+    return bool(
+        stripped == title
+        and PART_HEADING_RE.match(title)
+        and word_count(stripped) <= 4
+    )
+
+
+def _matches_explicit_heading(line: str) -> bool:
+    return bool(
+        CHAPTER_HEADING_RE.match(line)
+        or PART_HEADING_RE.match(line)
+        or SPECIAL_HEADING_RE.match(line)
+        or APPENDIX_HEADING_RE.match(line)
+    )
+
+
+def _has_heading_spacing_context(previous_line: str | None, next_line: str | None) -> bool:
+    previous_blank = previous_line is None or not previous_line.strip()
+    next_blank = next_line is not None and not next_line.strip()
+    return previous_blank and next_blank
+
+
+def _lookahead_word_count(following_lines: list[str], max_nonempty_lines: int = 3) -> int:
+    collected: list[str] = []
+    for line in following_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        collected.append(stripped)
+        if len(collected) >= max_nonempty_lines:
+            break
+    return word_count(" ".join(collected))
+
+
+def _looks_like_short_heading_with_date_or_time_cues(line: str) -> bool:
+    stripped = line.strip()
+    if len(stripped) > 60 or word_count(stripped) > 6:
+        return False
+    if stripped[-1:] in ".!?;:":
+        return False
+
+    tokens = [token.strip(",") for token in re.split(r"[\s/-]+", stripped) if token.strip(",")]
+    if not tokens:
+        return False
+
+    cue_tokens = {
+        "present",
+        "day",
+        "days",
+        "week",
+        "weeks",
+        "month",
+        "months",
+        "year",
+        "years",
+        "morning",
+        "afternoon",
+        "evening",
+        "night",
+        "earlier",
+        "later",
+        "today",
+        "yesterday",
+        "tomorrow",
+        "next",
+        "following",
+        "same",
+        "this",
+        "that",
+    }
+    month_tokens = {
+        "jan",
+        "january",
+        "feb",
+        "february",
+        "mar",
+        "march",
+        "apr",
+        "april",
+        "may",
+        "jun",
+        "june",
+        "jul",
+        "july",
+        "aug",
+        "august",
+        "sep",
+        "sept",
+        "september",
+        "oct",
+        "october",
+        "nov",
+        "november",
+        "dec",
+        "december",
+    }
+    weekday_tokens = {
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    }
+
+    lowered = [token.lower() for token in tokens]
+    has_cue_token = bool(set(lowered) & (cue_tokens | month_tokens | weekday_tokens))
+    has_year_or_roman = any(token.isdigit() or ROMAN_NUMERAL_RE.match(token) for token in tokens)
+    if not has_cue_token and not has_year_or_roman:
+        return False
+
+    for token in tokens:
+        if token.isdigit() or ROMAN_NUMERAL_RE.match(token):
+            continue
+        alpha = re.sub(r"[^A-Za-z]", "", token)
+        if not alpha:
+            continue
+        if not (alpha.istitle() or alpha.isupper()):
+            return False
+
+    return True
 
 
 def _flush_chapter(

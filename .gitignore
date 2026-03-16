@@ -9,6 +9,6 @@ projects/
 *.wav
 *.mp3
 smoke/*.pdf
-smoke/projects*/
+smoke/*projects*/
 voice samples/
 voice samples.md

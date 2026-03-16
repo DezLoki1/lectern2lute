@@ -78,6 +78,25 @@ def load_manifest(project_dir: Path) -> ProjectManifest:
     return ProjectManifest.from_dict(payload)
 
 
+def update_chapter_clean_text(project_dir: Path, chapter_index: int, clean_text: str) -> ProjectManifest:
+    manifest = load_manifest(project_dir)
+    chapter = next((item for item in manifest.chapters if item.index == chapter_index), None)
+    if chapter is None:
+        raise ValueError(f"Chapter {chapter_index} was not found in the manifest.")
+
+    normalized_text = clean_text.strip()
+    target_path = project_dir / chapter.clean_text_path
+    target_path.write_text(normalized_text + "\n", encoding="utf-8")
+
+    chapter.word_count = word_count(normalized_text)
+    chapter.estimated_minutes = estimate_minutes(normalized_text)
+
+    manifest.total_word_count = sum(item.word_count for item in manifest.chapters)
+    manifest.total_estimated_minutes = round(sum(item.estimated_minutes for item in manifest.chapters), 2)
+    save_manifest(project_dir, manifest)
+    return manifest
+
+
 def find_existing_project(output_root: Path, source_file: Path) -> Path | None:
     if not output_root.exists():
         return None

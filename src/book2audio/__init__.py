@@ -1,4 +1,4 @@
-"""book2audio package."""
+"""lectern2lute package."""
 
 __all__ = ["__version__"]
 

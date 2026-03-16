@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(slots=True)
@@ -89,6 +90,24 @@ def build_fallback_voice_list() -> list[VoiceInfo]:
         )
         for voice, language_code in FALLBACK_KOKORO_VOICES
     ]
+
+
+def humanize_voice_id(voice: str) -> str:
+    if "_" not in voice:
+        return voice.replace("-", " ").title()
+    return voice.split("_", 1)[1].replace("_", " ").replace("-", " ").title()
+
+
+def friendly_voice_label(voice_info: VoiceInfo) -> str:
+    return f"{humanize_voice_id(voice_info.voice)} ({voice_info.language})"
+
+
+def get_voice_sample_path(voice: str, root: Path | None = None) -> Path | None:
+    base_root = root or Path(__file__).resolve().parents[2]
+    sample_path = base_root / "voice samples" / f"{voice}.mp3"
+    if sample_path.exists():
+        return sample_path
+    return None
 
 
 def list_kokoro_voices(repo_id: str = "hexgrad/Kokoro-82M") -> list[VoiceInfo]:

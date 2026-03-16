@@ -1,6 +1,6 @@
-# book2audio
+# lectern2lute
 
-`book2audio` is a Windows-first Python CLI for turning DRM-free `PDF`, `EPUB`, `TXT`, and `MD` files into audiobook-ready chapter projects.
+`lectern2lute` is a Windows-first Python CLI for turning DRM-free `PDF`, `EPUB`, `TXT`, and `MD` files into audiobook-ready chapter projects.
 
 This first scaffold focuses on the parts that usually make or break quality:
 
@@ -74,13 +74,13 @@ If `torch.cuda.is_available()` is `False` after install, you likely have a CPU-o
 List the available Kokoro voices:
 
 ```powershell
-book2audio voices
+lectern2lute voices
 ```
 
 Create a project from a source file and render a short sample:
 
 ```powershell
-book2audio convert .\books\example.pdf `
+lectern2lute convert .\books\example.pdf `
   --voice af_heart `
   --mode sample
 ```
@@ -88,7 +88,7 @@ book2audio convert .\books\example.pdf `
 If the sample sounds right, rerun the same command in full mode:
 
 ```powershell
-book2audio convert .\books\example.pdf `
+lectern2lute convert .\books\example.pdf `
   --voice af_heart `
   --mode full
 ```
@@ -100,14 +100,14 @@ book2audio convert .\books\example.pdf `
 Launch the desktop app from the terminal:
 
 ```powershell
-book2audio gui
+lectern2lute gui
 ```
 
 Or use the dedicated launcher after reinstalling the editable package:
 
 ```powershell
 py -m pip install -e .[kokoro]
-book2audio-gui
+lectern2lute-gui
 ```
 
 The GUI lets you:
@@ -124,31 +124,31 @@ The GUI lets you:
 ### Ingest a book manually
 
 ```powershell
-book2audio ingest .\books\example.epub
+lectern2lute ingest .\books\example.epub
 ```
 
 ### Inspect the generated project
 
 ```powershell
-book2audio inspect .\projects\example
+lectern2lute inspect .\projects\example
 ```
 
 ### Preview cleaned chapter text
 
 ```powershell
-book2audio preview .\projects\example --chapter 1
+lectern2lute preview .\projects\example --chapter 1
 ```
 
 ### Smoke-test the audio pipeline
 
 ```powershell
-book2audio render .\projects\example --backend silence
+lectern2lute render .\projects\example --backend silence
 ```
 
 ### Render with Kokoro
 
 ```powershell
-book2audio render .\projects\example `
+lectern2lute render .\projects\example `
   --backend kokoro `
   --voice af_heart `
   --kokoro-lang-code a `
@@ -160,7 +160,7 @@ The official Kokoro examples use `KPipeline(lang_code='a')` and voices such as `
 ### Filter voices by language
 
 ```powershell
-book2audio voices --language "American English"
+lectern2lute voices --language "American English"
 ```
 
 ### Use an external local TTS command
@@ -168,7 +168,7 @@ book2audio voices --language "American English"
 The command template must produce a `.wav` file at `{output}` and can read the segment text from `{input}`.
 
 ```powershell
-book2audio render .\projects\example `
+lectern2lute render .\projects\example `
   --backend command `
   --voice af_sky `
   --command-template "my-tts-cli --input {input} --output {output} --voice {voice}"

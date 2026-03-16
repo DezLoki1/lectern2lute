@@ -16,6 +16,7 @@ from tkinter.scrolledtext import ScrolledText
 
 from book2audio.audio import AudioPlayerError, build_audio_player
 from book2audio.estimation import estimate_project_runtime
+from book2audio.export import export_project_m4b
 from book2audio.models import ChapterRecord, ProjectManifest
 from book2audio.pipeline import ensure_project
 from book2audio.project import (
@@ -184,6 +185,8 @@ class Book2AudioGUI:
         self.render_full_button.grid(row=3, column=1, sticky="ew", padx=8, pady=(8, 0))
         self.open_project_button = ttk.Button(action_frame, text="Open Project Folder", command=self._open_project_folder)
         self.open_project_button.grid(row=3, column=2, sticky="ew", pady=(8, 0))
+        self.export_m4b_button = ttk.Button(action_frame, text="Export M4B", command=self._export_m4b)
+        self.export_m4b_button.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
         left_container = ttk.Frame(main, width=390)
         left_container.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
@@ -549,6 +552,17 @@ class Book2AudioGUI:
             render_control=controller,
         )
 
+    def _export_m4b(self) -> None:
+        if self.project_dir is None:
+            messagebox.showinfo("No Project", "Prepare and render a project first.", parent=self.root)
+            return
+
+        overwrite = bool(self.overwrite_var.get())
+        self._start_task(
+            "Exporting M4B audiobook...",
+            lambda: self._export_m4b_worker(self.project_dir, overwrite=overwrite),
+        )
+
     def _toggle_render_pause(self) -> None:
         if self.render_controller is None:
             return
@@ -736,6 +750,11 @@ class Book2AudioGUI:
         self.events.put(("full_done", project_dir, updated_manifest))
         self.events.put(("log", f"Full conversion complete: {project_dir}"))
 
+    def _export_m4b_worker(self, project_dir: Path, *, overwrite: bool) -> None:
+        output_path = export_project_m4b(project_dir, overwrite=overwrite)
+        self.events.put(("m4b_done", output_path))
+        self.events.put(("log", f"M4B export complete: {output_path}"))
+
     def _emit_render_progress(self, progress: RenderProgress) -> None:
         self.events.put(("progress", progress))
 
@@ -798,6 +817,11 @@ class Book2AudioGUI:
                     f"Finished rendering {len(event[2].chapters)} chapters.\n\nProject folder:\n{event[1]}",
                     parent=self.root,
                 )
+            elif kind == "m4b_done":
+                self.status_var.set(f"M4B export ready: {event[1].name}")
+                self.progress_value_var.set(100.0)
+                self.progress_detail_var.set("100% complete")
+                messagebox.showinfo("M4B Ready", f"Created audiobook file:\n{event[1]}", parent=self.root)
             elif kind == "cancelled":
                 self.status_var.set(event[1])
                 detail = self.progress_detail_var.get().strip()
@@ -1438,6 +1462,7 @@ class Book2AudioGUI:
         self.render_chapter_button.configure(state=state)
         self.render_full_button.configure(state=state)
         self.open_project_button.configure(state=state)
+        self.export_m4b_button.configure(state=state)
         self.save_edits_button.configure(state=state)
         self.revert_edits_button.configure(state=state)
         self.rename_title_button.configure(state=state)

@@ -7,6 +7,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from book2audio.export import export_project_m4b
 from book2audio.pipeline import ensure_project, ingest_book
 from book2audio.project import load_manifest
 from book2audio.render import render_project, render_sample
@@ -205,6 +206,56 @@ def gui() -> None:
     from book2audio.gui import main as gui_main
 
     gui_main()
+
+
+@app.command("export-m4b")
+def export_m4b(
+    project_dir: Path = typer.Argument(..., exists=True, file_okay=False, resolve_path=True),
+    output_path: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        resolve_path=True,
+        help="Optional target .m4b path. Defaults to <project>/exports/<slug>.m4b.",
+    ),
+    title: str | None = typer.Option(
+        None,
+        "--title",
+        help="Override the audiobook title written into the M4B metadata.",
+    ),
+    author: str | None = typer.Option(
+        None,
+        "--author",
+        help="Optional author name written into the M4B metadata.",
+    ),
+    narrator: str | None = typer.Option(
+        None,
+        "--narrator",
+        help="Optional narrator name written into the M4B metadata.",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Regenerate an existing M4B file if one already exists.",
+    ),
+) -> None:
+    try:
+        output_file = export_project_m4b(
+            project_dir,
+            output_path=output_path,
+            title=title,
+            author=author,
+            narrator=narrator,
+            overwrite=overwrite,
+        )
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[bold red]M4B export failed:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[bold green]M4B:[/bold green] {output_file}")
+    metadata_json = output_file.with_suffix(".json")
+    if metadata_json.exists():
+        console.print(f"[bold green]Metadata:[/bold green] {metadata_json}")
 
 
 @app.command()

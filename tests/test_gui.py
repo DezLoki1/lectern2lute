@@ -46,6 +46,7 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(app.render_sample_button.cget("text"), "Generate Sample")
             self.assertEqual(app.render_chapter_button.cget("text"), "Render Selected Chapter")
             self.assertEqual(app.render_full_button.cget("text"), "Convert Full Book")
+            self.assertEqual(app.export_m4b_button.cget("text"), "Export M4B")
             self.assertEqual(app.pause_render_button.cget("text"), "Pause Render")
             self.assertEqual(app.stop_render_button.cget("text"), "Stop Render")
             self.assertEqual(app.rename_title_button.cget("text"), "Rename Title")

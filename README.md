@@ -118,6 +118,7 @@ The GUI lets you:
 - choose a Kokoro voice and speed
 - render a short sample from the selected chapter
 - run the full conversion once the sample sounds right
+- export a finished project to a chapter-marked `M4B`
 
 ### Advanced commands
 
@@ -156,6 +157,16 @@ lectern2lute render .\projects\example `
 ```
 
 The official Kokoro examples use `KPipeline(lang_code='a')` and voices such as `af_heart`. Make sure the language code matches the voice family you choose.
+
+### Export a finished project to M4B
+
+After the full chapter render is done, wrap the chapter MP3 files into a single `.m4b` audiobook with embedded chapter markers:
+
+```powershell
+lectern2lute export-m4b .\projects\example --author "John Doe" --narrator "af_heart"
+```
+
+By default, the export lands under `projects\<slug>\exports\<slug>.m4b` and writes a small sidecar JSON file with the export metadata.
 
 ### Filter voices by language
 

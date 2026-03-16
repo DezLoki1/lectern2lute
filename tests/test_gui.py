@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from book2audio.gui import Book2AudioGUI, RenderSettings
-from book2audio.render import RenderProgress
+from book2audio.render import RenderController, RenderProgress
 from book2audio.pipeline import ingest_book
 
 
@@ -46,11 +46,34 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(app.render_sample_button.cget("text"), "Generate Sample")
             self.assertEqual(app.render_chapter_button.cget("text"), "Render Selected Chapter")
             self.assertEqual(app.render_full_button.cget("text"), "Convert Full Book")
+            self.assertEqual(app.pause_render_button.cget("text"), "Pause Render")
+            self.assertEqual(app.stop_render_button.cget("text"), "Stop Render")
             self.assertEqual(app.rename_title_button.cget("text"), "Rename Title")
             self.assertEqual(app.split_chapter_button.cget("text"), "Split at Cursor")
             self.assertEqual(app.merge_up_button.cget("text"), "Merge Up")
             self.assertEqual(app.merge_down_button.cget("text"), "Merge Down")
             self.assertEqual(app.delete_chapter_button.cget("text"), "Delete Chapter")
+        finally:
+            root.destroy()
+
+    def test_render_control_buttons_follow_active_render_state(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            with patch.object(Book2AudioGUI, "_start_task", lambda self, status_text, worker: None):
+                app = Book2AudioGUI(root)
+
+            self.assertEqual(str(app.pause_render_button.cget("state")), "disabled")
+            self.assertEqual(str(app.stop_render_button.cget("state")), "disabled")
+
+            app.busy = True
+            app.render_controller = RenderController()
+            app.render_pause_requested = True
+            app._sync_render_control_buttons()
+
+            self.assertEqual(str(app.pause_render_button.cget("state")), "normal")
+            self.assertEqual(app.pause_render_button.cget("text"), "Resume Render")
+            self.assertEqual(str(app.stop_render_button.cget("state")), "normal")
         finally:
             root.destroy()
 

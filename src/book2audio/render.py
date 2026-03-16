@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -31,6 +32,38 @@ class RenderProgress:
 
 
 ProgressCallback = Callable[[RenderProgress], None]
+
+
+class RenderCancelled(RuntimeError):
+    """Raised when a cooperative render stop request is honored."""
+
+
+class RenderController:
+    def __init__(self) -> None:
+        self._cancel_event = threading.Event()
+        self._resume_event = threading.Event()
+        self._resume_event.set()
+
+    @property
+    def is_paused(self) -> bool:
+        return not self._resume_event.is_set()
+
+    def request_pause(self) -> None:
+        self._resume_event.clear()
+
+    def resume(self) -> None:
+        self._resume_event.set()
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
+        self._resume_event.set()
+
+    def checkpoint(self) -> None:
+        if self._cancel_event.is_set():
+            raise RenderCancelled("Render stopped. Any finished chapter files remain on disk.")
+        self._resume_event.wait()
+        if self._cancel_event.is_set():
+            raise RenderCancelled("Render stopped. Any finished chapter files remain on disk.")
 
 
 def split_text_into_segments(text: str, max_chars: int = 900) -> list[str]:
@@ -79,6 +112,7 @@ def render_project(
     sample_rate: int = 24000,
     overwrite: bool = False,
     progress_callback: ProgressCallback | None = None,
+    controller: RenderController | None = None,
 ) -> ProjectManifest:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is required on PATH to render chapter MP3 files.")
@@ -133,6 +167,7 @@ def render_project(
         return manifest
 
     for chapter_position, plan in enumerate(chapter_plans, start=1):
+        _checkpoint(controller)
         chapter = plan["chapter"]
         chapter_dir = plan["chapter_dir"]
         output_mp3 = plan["output_mp3"]
@@ -165,9 +200,11 @@ def render_project(
             progress_callback=progress_callback,
             completed_units=completed_units,
             total_units=total_units,
+            controller=controller,
         )
         completed_units += len(segment_records)
         _write_render_plan(chapter_dir, chapter.index, chapter.title, segments)
+        _checkpoint(controller)
 
         _emit_progress(
             progress_callback,
@@ -183,6 +220,7 @@ def render_project(
             message=f"Stitching chapter {chapter_position}/{total_chapters}: {chapter.title}",
         )
         _concat_segments(segment_records, output_mp3)
+        _checkpoint(controller)
         completed_units += 1
         _emit_progress(
             progress_callback,
@@ -198,6 +236,7 @@ def render_project(
             message=f"Finished chapter {chapter_position}/{total_chapters}: {chapter.title}",
         )
         chapter.audio_path = str(output_mp3.relative_to(project_dir).as_posix())
+        save_manifest(project_dir, manifest)
 
     save_manifest(project_dir, manifest)
     _emit_progress(
@@ -227,6 +266,7 @@ def render_sample(
     overwrite: bool = False,
     progress_callback: ProgressCallback | None = None,
     sample_metadata: dict[str, Any] | None = None,
+    controller: RenderController | None = None,
 ) -> Path:
     manifest = load_manifest(project_dir)
     chapter = next((item for item in manifest.chapters if item.index == chapter_index), None)
@@ -263,6 +303,7 @@ def render_sample(
         return mp3_path
 
     text_path.write_text(sample_text + "\n", encoding="utf-8")
+    _checkpoint(controller)
     _emit_progress(
         progress_callback,
         phase="segment_start",
@@ -283,6 +324,7 @@ def render_sample(
         voice=voice,
         sample_rate=sample_rate,
     )
+    _checkpoint(controller)
     _emit_progress(
         progress_callback,
         phase="segment_complete",
@@ -339,9 +381,11 @@ def _render_segments(
     progress_callback: ProgressCallback | None,
     completed_units: int,
     total_units: int,
+    controller: RenderController | None,
 ) -> list[RenderSegment]:
     records: list[RenderSegment] = []
     for segment_index, segment_text in enumerate(segments, start=1):
+        _checkpoint(controller)
         text_path = chapter_dir / f"segment-{segment_index:03d}.txt"
         audio_path = chapter_dir / f"segment-{segment_index:03d}.wav"
         text_path.write_text(segment_text.strip() + "\n", encoding="utf-8")
@@ -393,6 +437,7 @@ def _render_segments(
                 f"for chapter {chapter_position}/{total_chapters}: {chapter_title}"
             ),
         )
+        _checkpoint(controller)
     return records
 
 
@@ -536,3 +581,9 @@ def _emit_progress(
             message=message,
         )
     )
+
+
+def _checkpoint(controller: RenderController | None) -> None:
+    if controller is None:
+        return
+    controller.checkpoint()

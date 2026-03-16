@@ -26,7 +26,13 @@ from book2audio.project import (
     split_chapter,
     update_chapter_clean_text,
 )
-from book2audio.render import RenderProgress, render_project, render_sample
+from book2audio.render import (
+    RenderCancelled,
+    RenderController,
+    RenderProgress,
+    render_project,
+    render_sample,
+)
 from book2audio.tts import build_backend
 from book2audio.voices import (
     VoiceInfo,
@@ -80,6 +86,9 @@ class Book2AudioGUI:
         self.active_chapter_index: int | None = None
         self.last_sample_path: Path | None = None
         self.task_started_at: float | None = None
+        self.render_controller: RenderController | None = None
+        self.render_pause_requested = False
+        self.preserve_progress_on_idle = False
 
         self.source_var = tk.StringVar()
         self.output_root_var = tk.StringVar(value=str(DEFAULT_OUTPUT_ROOT))
@@ -409,8 +418,22 @@ class Book2AudioGUI:
         status_bar.grid(row=1, column=0, sticky="ew")
         status_bar.columnconfigure(0, weight=1)
         status_bar.columnconfigure(1, weight=0)
+        status_bar.columnconfigure(2, weight=0)
+        status_bar.columnconfigure(3, weight=0)
         ttk.Label(status_bar, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
         ttk.Label(status_bar, textvariable=self.progress_detail_var).grid(row=0, column=1, sticky="e", padx=(12, 0))
+        self.pause_render_button = ttk.Button(
+            status_bar,
+            text="Pause Render",
+            command=self._toggle_render_pause,
+        )
+        self.pause_render_button.grid(row=0, column=2, sticky="e", padx=(12, 0))
+        self.stop_render_button = ttk.Button(
+            status_bar,
+            text="Stop Render",
+            command=self._stop_render,
+        )
+        self.stop_render_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
         self.progress_bar = ttk.Progressbar(
             status_bar,
             orient=tk.HORIZONTAL,
@@ -418,7 +441,7 @@ class Book2AudioGUI:
             variable=self.progress_value_var,
             maximum=100,
         )
-        self.progress_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.progress_bar.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
 
         self._set_editor_text("")
 
@@ -485,7 +508,12 @@ class Book2AudioGUI:
             messagebox.showerror("Invalid Settings", str(exc), parent=self.root)
             return
 
-        self._start_task("Rendering sample...", lambda: self._render_sample_worker(settings))
+        controller = RenderController()
+        self._start_task(
+            "Rendering sample...",
+            lambda: self._render_sample_worker(settings, controller),
+            render_control=controller,
+        )
 
     def _render_selected_chapter(self) -> None:
         if not self._ensure_safe_to_continue("rendering the selected chapter"):
@@ -497,7 +525,12 @@ class Book2AudioGUI:
             messagebox.showerror("Invalid Settings", str(exc), parent=self.root)
             return
 
-        self._start_task("Rendering selected chapter...", lambda: self._render_selected_chapter_worker(settings))
+        controller = RenderController()
+        self._start_task(
+            "Rendering selected chapter...",
+            lambda: self._render_selected_chapter_worker(settings, controller),
+            render_control=controller,
+        )
 
     def _render_full(self) -> None:
         if not self._ensure_safe_to_continue("rendering the full conversion"):
@@ -509,7 +542,39 @@ class Book2AudioGUI:
             messagebox.showerror("Invalid Settings", str(exc), parent=self.root)
             return
 
-        self._start_task("Rendering full conversion...", lambda: self._render_full_worker(settings))
+        controller = RenderController()
+        self._start_task(
+            "Rendering full conversion...",
+            lambda: self._render_full_worker(settings, controller),
+            render_control=controller,
+        )
+
+    def _toggle_render_pause(self) -> None:
+        if self.render_controller is None:
+            return
+
+        if self.render_pause_requested:
+            self.render_controller.resume()
+            self.render_pause_requested = False
+            self.status_var.set("Render resumed. Waiting for the next progress update...")
+            self._queue_log("Render resumed.")
+        else:
+            self.render_controller.request_pause()
+            self.render_pause_requested = True
+            self.status_var.set("Pause requested. The render will pause after the current segment.")
+            self._queue_log("Pause requested for the active render.")
+        self._sync_render_control_buttons()
+
+    def _stop_render(self) -> None:
+        if self.render_controller is None:
+            return
+
+        self.render_controller.request_cancel()
+        self.render_pause_requested = False
+        self.status_var.set("Stop requested. The render will stop after the current segment.")
+        self._queue_log("Stop requested for the active render.")
+        self.pause_render_button.configure(state="disabled")
+        self.stop_render_button.configure(state="disabled")
 
     def _collect_settings(self, *, require_voice: bool) -> RenderSettings:
         source_text = self.source_var.get().strip()
@@ -558,13 +623,22 @@ class Book2AudioGUI:
             force_rebuild=False,
         )
 
-    def _start_task(self, status_text: str, worker: Callable[[], None]) -> None:
+    def _start_task(
+        self,
+        status_text: str,
+        worker: Callable[[], None],
+        *,
+        render_control: RenderController | None = None,
+    ) -> None:
         if self.busy:
             messagebox.showinfo("Busy", "A task is already running. Please wait for it to finish.", parent=self.root)
             return
 
         self.busy = True
         self.task_started_at = monotonic()
+        self.render_controller = render_control
+        self.render_pause_requested = False
+        self.preserve_progress_on_idle = False
         self.status_var.set(status_text)
         self.progress_value_var.set(0.0)
         self.progress_detail_var.set("Waiting for progress...")
@@ -576,6 +650,8 @@ class Book2AudioGUI:
     def _run_worker(self, worker: Callable[[], None]) -> None:
         try:
             worker()
+        except RenderCancelled as exc:  # pragma: no cover - exercised through manual GUI use
+            self.events.put(("cancelled", str(exc)))
         except Exception as exc:  # pragma: no cover - exercised through manual GUI use
             self.events.put(("error", str(exc), traceback.format_exc()))
         finally:
@@ -592,7 +668,7 @@ class Book2AudioGUI:
         action = "Rebuilt" if settings.force_rebuild else "Prepared"
         self.events.put(("log", f"{action} project: {project_dir}"))
 
-    def _render_sample_worker(self, settings: RenderSettings) -> None:
+    def _render_sample_worker(self, settings: RenderSettings, controller: RenderController) -> None:
         project_dir, _manifest = self._resolve_project(settings, allow_reingest=False)
         backend = build_backend(
             "kokoro",
@@ -610,12 +686,13 @@ class Book2AudioGUI:
             overwrite=True,
             progress_callback=self._emit_render_progress,
             sample_metadata={"voice": settings.voice, "speed": settings.speed},
+            controller=controller,
         )
         updated_manifest = load_manifest(project_dir)
         self.events.put(("sample_done", project_dir, updated_manifest, sample_path))
         self.events.put(("log", f"Sample rendered: {sample_path}"))
 
-    def _render_selected_chapter_worker(self, settings: RenderSettings) -> None:
+    def _render_selected_chapter_worker(self, settings: RenderSettings, controller: RenderController) -> None:
         project_dir, _manifest = self._resolve_project(settings, allow_reingest=False)
         backend = build_backend(
             "kokoro",
@@ -631,6 +708,7 @@ class Book2AudioGUI:
             sample_rate=24000,
             overwrite=True,
             progress_callback=self._emit_render_progress,
+            controller=controller,
         )
         chapter = next((item for item in updated_manifest.chapters if item.index == settings.selected_chapter_index), None)
         chapter_audio = None if chapter is None or chapter.audio_path is None else project_dir / chapter.audio_path
@@ -638,7 +716,7 @@ class Book2AudioGUI:
         if chapter_audio is not None:
             self.events.put(("log", f"Chapter rendered: {chapter_audio}"))
 
-    def _render_full_worker(self, settings: RenderSettings) -> None:
+    def _render_full_worker(self, settings: RenderSettings, controller: RenderController) -> None:
         project_dir, _manifest = self._resolve_project(settings, allow_reingest=False)
         backend = build_backend(
             "kokoro",
@@ -653,6 +731,7 @@ class Book2AudioGUI:
             sample_rate=24000,
             overwrite=settings.overwrite_audio,
             progress_callback=self._emit_render_progress,
+            controller=controller,
         )
         self.events.put(("full_done", project_dir, updated_manifest))
         self.events.put(("log", f"Full conversion complete: {project_dir}"))
@@ -719,6 +798,12 @@ class Book2AudioGUI:
                     f"Finished rendering {len(event[2].chapters)} chapters.\n\nProject folder:\n{event[1]}",
                     parent=self.root,
                 )
+            elif kind == "cancelled":
+                self.status_var.set(event[1])
+                detail = self.progress_detail_var.get().strip()
+                self.progress_detail_var.set("Stopped" if not detail or detail == "Idle" else f"{detail} | Stopped")
+                self.preserve_progress_on_idle = True
+                self._queue_log(event[1])
             elif kind == "log":
                 self._queue_log(event[1])
             elif kind == "error":
@@ -731,9 +816,12 @@ class Book2AudioGUI:
             elif kind == "idle":
                 self.busy = False
                 self.task_started_at = None
-                if self.progress_value_var.get() < 100.0:
+                self.render_controller = None
+                self.render_pause_requested = False
+                if self.progress_value_var.get() < 100.0 and not self.preserve_progress_on_idle:
                     self._reset_progress_display()
                 self._set_controls_enabled(True)
+                self.preserve_progress_on_idle = False
 
         self.root.after(150, self._poll_events)
 
@@ -826,6 +914,14 @@ class Book2AudioGUI:
     def _reset_progress_display(self) -> None:
         self.progress_value_var.set(0.0)
         self.progress_detail_var.set("Idle")
+
+    def _sync_render_control_buttons(self) -> None:
+        is_active = self.busy and self.render_controller is not None
+        self.pause_render_button.configure(
+            state="normal" if is_active else "disabled",
+            text="Resume Render" if is_active and self.render_pause_requested else "Pause Render",
+        )
+        self.stop_render_button.configure(state="normal" if is_active else "disabled")
 
     def _sync_left_scrollregion(self, _event: tk.Event[tk.Misc] | None = None) -> None:
         self.left_scroll_canvas.configure(scrollregion=self.left_scroll_canvas.bbox("all"))
@@ -1353,6 +1449,7 @@ class Book2AudioGUI:
         self.chapter_listbox.configure(state=state)
         self.editor_text.configure(state=state)
         self.stop_audio_button.configure(state="normal")
+        self._sync_render_control_buttons()
 
     def _open_project_folder(self) -> None:
         if self.project_dir is None:

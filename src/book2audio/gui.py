@@ -50,6 +50,7 @@ class RenderSettings:
     overwrite_audio: bool
     current_project_dir: Path | None = None
     current_project_source: Path | None = None
+    force_rebuild: bool = False
 
 
 class Book2AudioGUI:
@@ -79,7 +80,11 @@ class Book2AudioGUI:
         self.speed_var = tk.DoubleVar(value=1.0)
         self.sample_chars_var = tk.IntVar(value=650)
         self.overwrite_var = tk.BooleanVar(value=False)
-        self.status_var = tk.StringVar(value="Choose a source file, then prepare a project or render a sample.")
+        self.workflow_var = tk.StringVar(
+            value="1. Choose a book.  2. Prepare or rebuild the project.  3. Pick a voice.  "
+            "4. Generate a sample from the selected chapter.  5. Convert the full book."
+        )
+        self.status_var = tk.StringVar(value="Choose a source file, then prepare the project.")
         self.editor_state_var = tk.StringVar(value="Cleaned chapter text will appear here and can be edited.")
         self.project_title_var = tk.StringVar(value="No project loaded")
         self.project_path_var = tk.StringVar(value="-")
@@ -87,8 +92,8 @@ class Book2AudioGUI:
         self.project_parser_var = tk.StringVar(value="-")
         self.project_chapters_var = tk.StringVar(value="0")
         self.project_minutes_var = tk.StringVar(value="0.00")
-        self.sample_chapter_var = tk.StringVar(value="Chapter 1")
-        self.last_sample_var = tk.StringVar(value="No sample rendered yet")
+        self.sample_chapter_var = tk.StringVar(value="Selected chapter for samples: not loaded yet")
+        self.last_sample_var = tk.StringVar(value="No generated sample yet")
 
         self.project_dir: Path | None = None
         self.current_source_path: Path | None = None
@@ -117,64 +122,130 @@ class Book2AudioGUI:
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=0)
         main.columnconfigure(1, weight=1)
-        main.rowconfigure(0, weight=1)
-        main.rowconfigure(1, weight=0)
+        main.rowconfigure(1, weight=1)
+        main.rowconfigure(2, weight=0)
 
-        left = ttk.Frame(main, width=390)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        action_frame = ttk.LabelFrame(main, text="Workflow", padding=12)
+        action_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 16))
+        for column in range(3):
+            action_frame.columnconfigure(column, weight=1)
+
+        ttk.Label(
+            action_frame,
+            textvariable=self.workflow_var,
+            wraplength=1220,
+            justify="left",
+            style="Header.TLabel",
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(
+            action_frame,
+            textvariable=self.sample_chapter_var,
+            wraplength=1220,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        self.prepare_button = ttk.Button(action_frame, text="Prepare Project", command=self._prepare_project)
+        self.prepare_button.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        self.rebuild_button = ttk.Button(action_frame, text="Rebuild Project", command=self._rebuild_project)
+        self.rebuild_button.grid(row=2, column=1, sticky="ew", padx=8, pady=(12, 0))
+        self.render_sample_button = ttk.Button(action_frame, text="Generate Sample", command=self._render_sample)
+        self.render_sample_button.grid(row=2, column=2, sticky="ew", pady=(12, 0))
+
+        self.render_chapter_button = ttk.Button(
+            action_frame,
+            text="Render Selected Chapter",
+            command=self._render_selected_chapter,
+        )
+        self.render_chapter_button.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.render_full_button = ttk.Button(action_frame, text="Convert Full Book", command=self._render_full)
+        self.render_full_button.grid(row=3, column=1, sticky="ew", padx=8, pady=(8, 0))
+        self.open_project_button = ttk.Button(action_frame, text="Open Project Folder", command=self._open_project_folder)
+        self.open_project_button.grid(row=3, column=2, sticky="ew", pady=(8, 0))
+
+        left_container = ttk.Frame(main, width=390)
+        left_container.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
+        left_container.columnconfigure(0, weight=1)
+        left_container.rowconfigure(0, weight=1)
+
+        self.left_scroll_canvas = tk.Canvas(left_container, highlightthickness=0, borderwidth=0)
+        self.left_scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        self.left_scrollbar = ttk.Scrollbar(left_container, orient=tk.VERTICAL, command=self.left_scroll_canvas.yview)
+        self.left_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.left_scroll_canvas.configure(yscrollcommand=self.left_scrollbar.set)
+
+        left = ttk.Frame(self.left_scroll_canvas, width=390)
         left.columnconfigure(0, weight=1)
+        left.rowconfigure(2, weight=1)
+        self.left_scroll_window = self.left_scroll_canvas.create_window((0, 0), window=left, anchor="nw")
+        left.bind("<Configure>", self._sync_left_scrollregion)
+        self.left_scroll_canvas.bind("<Configure>", self._sync_left_canvas_width)
+        self.left_scroll_canvas.bind("<Enter>", self._bind_left_mousewheel)
+        self.left_scroll_canvas.bind("<Leave>", self._unbind_left_mousewheel)
+        left.bind("<Enter>", self._bind_left_mousewheel)
+        left.bind("<Leave>", self._unbind_left_mousewheel)
 
-        source_frame = ttk.LabelFrame(left, text="Source", padding=12)
+        source_frame = ttk.LabelFrame(left, text="Book & Output", padding=12)
         source_frame.grid(row=0, column=0, sticky="ew")
         source_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(source_frame, text="Book file").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            source_frame,
+            text="Choose a source file and the folder where the prepared project should live.",
+            wraplength=350,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(source_frame, text="Book file").grid(row=1, column=0, sticky="w", pady=(10, 0))
         self.source_entry = ttk.Entry(source_frame, textvariable=self.source_var)
-        self.source_entry.grid(row=1, column=0, sticky="ew", pady=(4, 8))
+        self.source_entry.grid(row=2, column=0, sticky="ew", pady=(4, 8))
         self.browse_source_button = ttk.Button(source_frame, text="Browse...", command=self._browse_source)
-        self.browse_source_button.grid(row=1, column=1, padx=(8, 0), pady=(4, 8))
+        self.browse_source_button.grid(row=2, column=1, padx=(8, 0), pady=(4, 8))
 
-        ttk.Label(source_frame, text="Project output folder").grid(row=2, column=0, sticky="w")
+        ttk.Label(source_frame, text="Project output folder").grid(row=3, column=0, sticky="w")
         self.output_entry = ttk.Entry(source_frame, textvariable=self.output_root_var)
-        self.output_entry.grid(row=3, column=0, sticky="ew", pady=(4, 8))
+        self.output_entry.grid(row=4, column=0, sticky="ew", pady=(4, 0))
         self.browse_output_button = ttk.Button(source_frame, text="Browse...", command=self._browse_output_root)
-        self.browse_output_button.grid(row=3, column=1, padx=(8, 0), pady=(4, 8))
+        self.browse_output_button.grid(row=4, column=1, padx=(8, 0), pady=(4, 0))
 
-        self.prepare_button = ttk.Button(source_frame, text="Prepare Project", command=self._prepare_project)
-        self.prepare_button.grid(row=4, column=0, sticky="ew", pady=(4, 0))
-
-        voice_frame = ttk.LabelFrame(left, text="Voice & Playback", padding=12)
+        voice_frame = ttk.LabelFrame(left, text="Voice & Samples", padding=12)
         voice_frame.grid(row=1, column=0, sticky="ew", pady=(16, 0))
         voice_frame.columnconfigure(0, weight=1)
         voice_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(voice_frame, text="Narrator voice").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            voice_frame,
+            text="Pick the narrator voice, tune the speed, and preview either the built-in voice sample or your generated sample.",
+            wraplength=350,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(voice_frame, text="Narrator voice").grid(row=1, column=0, sticky="w", pady=(10, 0))
         self.voice_combo = ttk.Combobox(
             voice_frame,
             textvariable=self.voice_display_var,
             state="readonly",
             height=18,
         )
-        self.voice_combo.grid(row=1, column=0, sticky="ew", pady=(4, 8))
+        self.voice_combo.grid(row=2, column=0, sticky="ew", pady=(4, 8))
         self.voice_combo.bind("<<ComboboxSelected>>", self._on_voice_selected)
         self.refresh_voices_button = ttk.Button(voice_frame, text="Refresh", command=self._refresh_voices)
-        self.refresh_voices_button.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(4, 8))
+        self.refresh_voices_button.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(4, 8))
 
-        ttk.Label(voice_frame, text="Voice ID").grid(row=2, column=0, sticky="w")
-        ttk.Label(voice_frame, textvariable=self.voice_id_var).grid(row=3, column=0, sticky="w")
+        ttk.Label(voice_frame, text="Voice ID").grid(row=3, column=0, sticky="w")
+        ttk.Label(voice_frame, textvariable=self.voice_id_var).grid(row=4, column=0, sticky="w")
 
-        ttk.Label(voice_frame, text="Language").grid(row=2, column=1, sticky="w", padx=(8, 0))
-        ttk.Label(voice_frame, textvariable=self.voice_language_var).grid(row=3, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(voice_frame, text="Language").grid(row=3, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(voice_frame, textvariable=self.voice_language_var).grid(row=4, column=1, sticky="w", padx=(8, 0))
 
         ttk.Label(voice_frame, textvariable=self.voice_preview_var, wraplength=340, justify="left").grid(
-            row=4,
+            row=5,
             column=0,
             columnspan=2,
             sticky="w",
             pady=(10, 0),
         )
 
-        ttk.Label(voice_frame, text="Speed").grid(row=5, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(voice_frame, text="Speed").grid(row=6, column=0, sticky="w", pady=(12, 0))
         self.speed_spinbox = ttk.Spinbox(
             voice_frame,
             from_=0.5,
@@ -183,9 +254,9 @@ class Book2AudioGUI:
             textvariable=self.speed_var,
             width=10,
         )
-        self.speed_spinbox.grid(row=6, column=0, sticky="ew", pady=(4, 0))
+        self.speed_spinbox.grid(row=7, column=0, sticky="ew", pady=(4, 0))
 
-        ttk.Label(voice_frame, text="Sample length (chars)").grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(12, 0))
+        ttk.Label(voice_frame, text="Sample length (chars)").grid(row=6, column=1, sticky="w", padx=(8, 0), pady=(12, 0))
         self.sample_chars_spinbox = ttk.Spinbox(
             voice_frame,
             from_=200,
@@ -194,11 +265,11 @@ class Book2AudioGUI:
             textvariable=self.sample_chars_var,
             width=10,
         )
-        self.sample_chars_spinbox.grid(row=6, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+        self.sample_chars_spinbox.grid(row=7, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
 
-        ttk.Label(voice_frame, text="Last sample").grid(row=7, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(voice_frame, text="Last sample").grid(row=8, column=0, sticky="w", pady=(12, 0))
         ttk.Label(voice_frame, textvariable=self.last_sample_var, wraplength=340, justify="left").grid(
-            row=8,
+            row=9,
             column=0,
             columnspan=2,
             sticky="w",
@@ -206,44 +277,23 @@ class Book2AudioGUI:
         )
 
         self.play_voice_button = ttk.Button(voice_frame, text="Play Voice Preview", command=self._play_voice_preview)
-        self.play_voice_button.grid(row=9, column=0, sticky="ew", pady=(12, 0))
+        self.play_voice_button.grid(row=10, column=0, sticky="ew", pady=(12, 0))
         self.play_sample_button = ttk.Button(voice_frame, text="Play Last Sample", command=self._play_last_sample)
-        self.play_sample_button.grid(row=9, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
+        self.play_sample_button.grid(row=10, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
 
         self.stop_audio_button = ttk.Button(voice_frame, text="Stop Audio", command=self._stop_audio)
-        self.stop_audio_button.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.stop_audio_button.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
-        render_frame = ttk.LabelFrame(left, text="Render", padding=12)
-        render_frame.grid(row=2, column=0, sticky="ew", pady=(16, 0))
-        render_frame.columnconfigure(0, weight=1)
-        render_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(render_frame, text="Selected chapter is used for samples and chapter-only renders.").grid(
-            row=0,
-            column=0,
-            columnspan=2,
-            sticky="w",
-        )
-        ttk.Label(render_frame, textvariable=self.sample_chapter_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 8))
+        project_frame = ttk.LabelFrame(left, text="Project Snapshot", padding=12)
+        project_frame.grid(row=2, column=0, sticky="nsew", pady=(16, 0))
+        project_frame.columnconfigure(0, weight=1)
 
         self.overwrite_check = ttk.Checkbutton(
-            render_frame,
+            project_frame,
             text="Overwrite existing chapter/full audio files",
             variable=self.overwrite_var,
         )
-        self.overwrite_check.grid(row=2, column=0, columnspan=2, sticky="w")
-
-        self.render_sample_button = ttk.Button(render_frame, text="Render Sample", command=self._render_sample)
-        self.render_sample_button.grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        self.render_chapter_button = ttk.Button(render_frame, text="Render Chapter", command=self._render_selected_chapter)
-        self.render_chapter_button.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
-
-        self.render_full_button = ttk.Button(render_frame, text="Full Conversion", command=self._render_full)
-        self.render_full_button.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-
-        project_frame = ttk.LabelFrame(left, text="Project", padding=12)
-        project_frame.grid(row=3, column=0, sticky="nsew", pady=(16, 0))
-        project_frame.columnconfigure(0, weight=1)
+        self.overwrite_check.grid(row=0, column=0, sticky="w")
 
         details = [
             ("Title", self.project_title_var),
@@ -254,19 +304,22 @@ class Book2AudioGUI:
             ("Estimated Minutes", self.project_minutes_var),
         ]
         for row_index, (label, value) in enumerate(details):
-            ttk.Label(project_frame, text=label, style="Header.TLabel").grid(row=row_index * 2, column=0, sticky="w")
+            offset = 1
+            ttk.Label(project_frame, text=label, style="Header.TLabel").grid(
+                row=offset + row_index * 2,
+                column=0,
+                sticky="w",
+                pady=(10 if row_index == 0 else 0, 0),
+            )
             ttk.Label(project_frame, textvariable=value, wraplength=350, justify="left").grid(
-                row=row_index * 2 + 1,
+                row=offset + row_index * 2 + 1,
                 column=0,
                 sticky="w",
                 pady=(2, 8),
             )
 
-        self.open_project_button = ttk.Button(project_frame, text="Open Project Folder", command=self._open_project_folder)
-        self.open_project_button.grid(row=len(details) * 2, column=0, sticky="ew", pady=(8, 0))
-
         right = ttk.Frame(main)
-        right.grid(row=0, column=1, sticky="nsew")
+        right.grid(row=1, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
         right.rowconfigure(2, weight=1)
 
@@ -274,7 +327,11 @@ class Book2AudioGUI:
         editor_header.grid(row=0, column=0, sticky="ew")
         editor_header.columnconfigure(0, weight=1)
 
-        ttk.Label(editor_header, text="Chapter Editor", style="Header.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(editor_header, text="Review Chapters & Edit Text", style="Header.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
         ttk.Label(editor_header, textvariable=self.editor_state_var, wraplength=760, justify="left").grid(
             row=1,
             column=0,
@@ -295,7 +352,7 @@ class Book2AudioGUI:
         chapter_frame = ttk.Frame(content_split, padding=(0, 0, 12, 0))
         chapter_frame.columnconfigure(0, weight=1)
         chapter_frame.rowconfigure(1, weight=1)
-        ttk.Label(chapter_frame, text="Chapters").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(chapter_frame, text="Detected chapters").grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.chapter_listbox = tk.Listbox(chapter_frame, exportselection=False, height=24)
         self.chapter_listbox.grid(row=1, column=0, sticky="nsew")
         self.chapter_listbox.bind("<<ListboxSelect>>", self._on_chapter_selected)
@@ -310,7 +367,7 @@ class Book2AudioGUI:
         content_split.add(editor_frame, weight=3)
 
         log_frame = ttk.LabelFrame(main, text="Activity", padding=12)
-        log_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(16, 0))
+        log_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(16, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = ScrolledText(log_frame, wrap=tk.WORD, height=8)
@@ -333,7 +390,7 @@ class Book2AudioGUI:
         if not selected:
             return
         self.source_var.set(selected)
-        self.status_var.set("Source file selected. Prepare the project or render a sample.")
+        self.status_var.set("Source file selected. Prepare the project, or rebuild it for a fresh parse.")
 
     def _browse_output_root(self) -> None:
         selected = filedialog.askdirectory(
@@ -354,6 +411,28 @@ class Book2AudioGUI:
             return
 
         self._start_task("Preparing project...", lambda: self._prepare_project_worker(settings))
+
+    def _rebuild_project(self) -> None:
+        if not self._ensure_safe_to_continue("rebuilding the project"):
+            return
+
+        try:
+            settings = self._collect_settings(require_voice=False)
+        except ValueError as exc:
+            messagebox.showerror("Invalid Settings", str(exc), parent=self.root)
+            return
+
+        confirmed = messagebox.askyesno(
+            "Rebuild Project",
+            "Rebuild the prepared project from the original source?\n\n"
+            "This will replace the current cleaned chapter files, samples, and renders for this project.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+
+        settings.force_rebuild = True
+        self._start_task("Rebuilding project from source...", lambda: self._prepare_project_worker(settings))
 
     def _render_sample(self) -> None:
         if not self._ensure_safe_to_continue("rendering a sample"):
@@ -435,6 +514,7 @@ class Book2AudioGUI:
             overwrite_audio=bool(self.overwrite_var.get()),
             current_project_dir=self.project_dir,
             current_project_source=self.current_source_path,
+            force_rebuild=False,
         )
 
     def _start_task(self, status_text: str, worker: Callable[[], None]) -> None:
@@ -463,9 +543,10 @@ class Book2AudioGUI:
         self.events.put(("log", f"Loaded {len(voices)} Kokoro voices."))
 
     def _prepare_project_worker(self, settings: RenderSettings) -> None:
-        project_dir, manifest = self._resolve_project(settings, allow_reingest=settings.overwrite_audio)
-        self.events.put(("project_ready", project_dir, manifest))
-        self.events.put(("log", f"Prepared project: {project_dir}"))
+        project_dir, manifest = self._resolve_project(settings, allow_reingest=settings.force_rebuild)
+        self.events.put(("project_ready", project_dir, manifest, settings.force_rebuild))
+        action = "Rebuilt" if settings.force_rebuild else "Prepared"
+        self.events.put(("log", f"{action} project: {project_dir}"))
 
     def _render_sample_worker(self, settings: RenderSettings) -> None:
         project_dir, _manifest = self._resolve_project(settings, allow_reingest=False)
@@ -529,11 +610,14 @@ class Book2AudioGUI:
         self.events.put(("log", f"Full conversion complete: {project_dir}"))
 
     def _resolve_project(self, settings: RenderSettings, *, allow_reingest: bool) -> tuple[Path, ProjectManifest]:
+        if allow_reingest:
+            return ensure_project(settings.source_path, settings.output_root, overwrite=True)
         if (
             settings.current_project_dir is not None
             and settings.current_project_source is not None
             and settings.current_project_source == settings.source_path
             and settings.current_project_dir.exists()
+            and settings.current_project_dir.parent.resolve() == settings.output_root.resolve()
         ):
             return settings.current_project_dir, load_manifest(settings.current_project_dir)
         return ensure_project(settings.source_path, settings.output_root, overwrite=allow_reingest)
@@ -550,7 +634,12 @@ class Book2AudioGUI:
                 self._apply_voice_list(event[1])
             elif kind == "project_ready":
                 self._apply_project(event[1], event[2], selected_chapter_index=self._selected_chapter_index())
-                self.status_var.set("Project ready. Review the cleaned text, tweak it if needed, then render a sample.")
+                status_text = (
+                    "Project rebuilt. Review the cleaned text, then generate a new sample."
+                    if event[3]
+                    else "Project ready. Review the cleaned text, tweak it if needed, then generate a sample."
+                )
+                self.status_var.set(status_text)
             elif kind == "sample_done":
                 self._apply_project(event[1], event[2], selected_chapter_index=self._selected_chapter_index())
                 self._update_last_sample_path(event[3])
@@ -627,6 +716,24 @@ class Book2AudioGUI:
             self.voice_preview_var.set(f"Built-in preview ready: {preview_path.name}")
         self._update_last_sample_path()
 
+    def _sync_left_scrollregion(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        self.left_scroll_canvas.configure(scrollregion=self.left_scroll_canvas.bbox("all"))
+
+    def _sync_left_canvas_width(self, event: tk.Event[tk.Misc]) -> None:
+        self.left_scroll_canvas.itemconfigure(self.left_scroll_window, width=event.width)
+
+    def _bind_left_mousewheel(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        self.left_scroll_canvas.bind_all("<MouseWheel>", self._on_left_mousewheel)
+
+    def _unbind_left_mousewheel(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        self.left_scroll_canvas.unbind_all("<MouseWheel>")
+
+    def _on_left_mousewheel(self, event: tk.Event[tk.Misc]) -> None:
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            return
+        self.left_scroll_canvas.yview_scroll(int(-delta / 120), "units")
+
     def _apply_project(
         self,
         project_dir: Path,
@@ -670,7 +777,7 @@ class Book2AudioGUI:
             self._load_chapter_into_editor(self.chapter_records[listbox_index].index)
         else:
             self.active_chapter_index = None
-            self.sample_chapter_var.set("Chapter 1")
+            self.sample_chapter_var.set("Selected chapter for samples: not available")
             self.editor_state_var.set("No chapters were found in the current project.")
             self._set_editor_text("")
 
@@ -708,7 +815,7 @@ class Book2AudioGUI:
 
         text = (self.project_dir / chapter.clean_text_path).read_text(encoding="utf-8").rstrip()
         self.active_chapter_index = chapter.index
-        self.sample_chapter_var.set(f"Chapter {chapter.index}: {chapter.title}")
+        self.sample_chapter_var.set(f"Selected chapter for samples: {chapter.index:03d}  {chapter.title}")
         self.editor_state_var.set(
             f"Editing cleaned text for {chapter.title}. Save changes before rerendering if you want them applied."
         )
@@ -925,6 +1032,7 @@ class Book2AudioGUI:
         self.refresh_voices_button.configure(state=state)
         self.play_voice_button.configure(state=state)
         self.play_sample_button.configure(state=state)
+        self.rebuild_button.configure(state=state)
         self.render_sample_button.configure(state=state)
         self.render_chapter_button.configure(state=state)
         self.render_full_button.configure(state=state)

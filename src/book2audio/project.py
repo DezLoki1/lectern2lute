@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,8 @@ def create_project(
 ) -> tuple[Path, ProjectManifest]:
     slug = slugify(document.title or input_path.stem)
     project_dir = unique_directory(output_root, slug, overwrite=overwrite)
+    if overwrite:
+        _clear_generated_project_files(project_dir)
     chapters_dir = project_dir / "chapters"
     chapters_dir.mkdir(parents=True, exist_ok=True)
 
@@ -116,3 +119,14 @@ def find_existing_project(output_root: Path, source_file: Path) -> Path | None:
             return candidate
 
     return None
+
+
+def _clear_generated_project_files(project_dir: Path) -> None:
+    for directory_name in ("chapters", "renders", "samples"):
+        target = project_dir / directory_name
+        if target.exists():
+            shutil.rmtree(target)
+
+    manifest_path = project_dir / MANIFEST_NAME
+    if manifest_path.exists():
+        manifest_path.unlink()

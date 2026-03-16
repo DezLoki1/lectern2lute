@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from book2audio.pipeline import ingest_book
-from book2audio.render import render_project, render_sample
+from book2audio.render import RenderProgress, render_project, render_sample
 from book2audio.tts import build_backend
 
 
@@ -55,9 +55,67 @@ class RenderTests(unittest.TestCase):
                 voice="default",
                 sample_rate=24000,
                 sample_chars=300,
+                sample_metadata={"voice": "default", "speed": 1.0},
             )
 
             self.assertTrue(sample_path.exists())
+            self.assertTrue(sample_path.with_suffix(".json").exists())
+
+    def test_render_project_reports_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            source = tmp_path / "book.txt"
+            source.write_text(
+                "Chapter 1\n\nThis chapter exists to verify progress callbacks during a full render. "
+                "It includes enough text to create more than one segment for the silence backend path.\n\n"
+                "Chapter 2\n\nThis chapter gives the render pipeline a second chapter to report progress against.",
+                encoding="utf-8",
+            )
+
+            project_dir, _ = ingest_book(source, tmp_path / "projects")
+            updates: list[RenderProgress] = []
+
+            render_project(
+                project_dir,
+                build_backend("silence"),
+                voice="default",
+                sample_rate=24000,
+                max_segment_chars=80,
+                progress_callback=updates.append,
+            )
+
+            self.assertTrue(updates)
+            self.assertEqual(updates[-1].phase, "complete")
+            self.assertEqual(updates[-1].percent, 100.0)
+            self.assertTrue(any(item.phase == "segment_start" for item in updates))
+            self.assertTrue(any(item.phase == "chapter_complete" for item in updates))
+
+    def test_render_sample_reports_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            source = tmp_path / "book.txt"
+            source.write_text(
+                "Chapter 1\n\nThis chapter exists to verify sample progress callbacks in the render pipeline.",
+                encoding="utf-8",
+            )
+
+            project_dir, _ = ingest_book(source, tmp_path / "projects")
+            updates: list[RenderProgress] = []
+
+            render_sample(
+                project_dir,
+                build_backend("silence"),
+                voice="default",
+                sample_rate=24000,
+                sample_chars=300,
+                sample_metadata={"voice": "default", "speed": 1.0},
+                progress_callback=updates.append,
+            )
+
+            self.assertTrue(updates)
+            self.assertEqual(updates[-1].phase, "complete")
+            self.assertEqual(updates[-1].percent, 100.0)
+            self.assertEqual(updates[0].phase, "segment_start")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable
 
 import tkinter as tk
@@ -14,6 +15,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from book2audio.audio import AudioPlayerError, build_audio_player
+from book2audio.estimation import estimate_project_runtime
 from book2audio.models import ChapterRecord, ProjectManifest
 from book2audio.pipeline import ensure_project
 from book2audio.project import (
@@ -24,7 +26,7 @@ from book2audio.project import (
     split_chapter,
     update_chapter_clean_text,
 )
-from book2audio.render import render_project, render_sample
+from book2audio.render import RenderProgress, render_project, render_sample
 from book2audio.tts import build_backend
 from book2audio.voices import (
     VoiceInfo,
@@ -77,6 +79,7 @@ class Book2AudioGUI:
         self.suspend_selection_events = False
         self.active_chapter_index: int | None = None
         self.last_sample_path: Path | None = None
+        self.task_started_at: float | None = None
 
         self.source_var = tk.StringVar()
         self.output_root_var = tk.StringVar(value=str(DEFAULT_OUTPUT_ROOT))
@@ -101,6 +104,8 @@ class Book2AudioGUI:
         self.project_minutes_var = tk.StringVar(value="0.00")
         self.sample_chapter_var = tk.StringVar(value="Selected chapter for samples: not loaded yet")
         self.last_sample_var = tk.StringVar(value="No generated sample yet")
+        self.progress_value_var = tk.DoubleVar(value=0.0)
+        self.progress_detail_var = tk.StringVar(value="Idle")
 
         self.project_dir: Path | None = None
         self.current_source_path: Path | None = None
@@ -111,6 +116,8 @@ class Book2AudioGUI:
         self.voice_id_to_label: dict[str, str] = {}
 
         self._build_ui()
+        self.speed_var.trace_add("write", self._on_estimation_inputs_changed)
+        self.voice_display_var.trace_add("write", self._on_estimation_inputs_changed)
         self._set_controls_enabled(True)
         self._queue_log("Loading available voices...")
         self._start_task("Loading Kokoro voices...", self._load_voices_worker)
@@ -308,7 +315,7 @@ class Book2AudioGUI:
             ("Source Format", self.project_format_var),
             ("Parser", self.project_parser_var),
             ("Chapters", self.project_chapters_var),
-            ("Estimated Minutes", self.project_minutes_var),
+            ("Estimated Runtime", self.project_minutes_var),
         ]
         for row_index, (label, value) in enumerate(details):
             offset = 1
@@ -401,7 +408,17 @@ class Book2AudioGUI:
         status_bar = ttk.Frame(self.root, padding=(16, 0, 16, 12))
         status_bar.grid(row=1, column=0, sticky="ew")
         status_bar.columnconfigure(0, weight=1)
+        status_bar.columnconfigure(1, weight=0)
         ttk.Label(status_bar, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
+        ttk.Label(status_bar, textvariable=self.progress_detail_var).grid(row=0, column=1, sticky="e", padx=(12, 0))
+        self.progress_bar = ttk.Progressbar(
+            status_bar,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            variable=self.progress_value_var,
+            maximum=100,
+        )
+        self.progress_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
         self._set_editor_text("")
 
@@ -547,7 +564,10 @@ class Book2AudioGUI:
             return
 
         self.busy = True
+        self.task_started_at = monotonic()
         self.status_var.set(status_text)
+        self.progress_value_var.set(0.0)
+        self.progress_detail_var.set("Waiting for progress...")
         self._set_controls_enabled(False)
         self._queue_log(status_text)
         thread = threading.Thread(target=self._run_worker, args=(worker,), daemon=True)
@@ -588,6 +608,8 @@ class Book2AudioGUI:
             sample_chars=settings.sample_chars,
             sample_rate=24000,
             overwrite=True,
+            progress_callback=self._emit_render_progress,
+            sample_metadata={"voice": settings.voice, "speed": settings.speed},
         )
         updated_manifest = load_manifest(project_dir)
         self.events.put(("sample_done", project_dir, updated_manifest, sample_path))
@@ -608,6 +630,7 @@ class Book2AudioGUI:
             chapter_indexes=[settings.selected_chapter_index],
             sample_rate=24000,
             overwrite=True,
+            progress_callback=self._emit_render_progress,
         )
         chapter = next((item for item in updated_manifest.chapters if item.index == settings.selected_chapter_index), None)
         chapter_audio = None if chapter is None or chapter.audio_path is None else project_dir / chapter.audio_path
@@ -629,9 +652,13 @@ class Book2AudioGUI:
             voice=settings.voice,
             sample_rate=24000,
             overwrite=settings.overwrite_audio,
+            progress_callback=self._emit_render_progress,
         )
         self.events.put(("full_done", project_dir, updated_manifest))
         self.events.put(("log", f"Full conversion complete: {project_dir}"))
+
+    def _emit_render_progress(self, progress: RenderProgress) -> None:
+        self.events.put(("progress", progress))
 
     def _resolve_project(self, settings: RenderSettings, *, allow_reingest: bool) -> tuple[Path, ProjectManifest]:
         if allow_reingest:
@@ -664,20 +691,29 @@ class Book2AudioGUI:
                     else "Project ready. Review the cleaned text, tweak it if needed, then generate a sample."
                 )
                 self.status_var.set(status_text)
+                self._reset_progress_display()
+            elif kind == "progress":
+                self._apply_render_progress(event[1])
             elif kind == "sample_done":
                 self._apply_project(event[1], event[2], selected_chapter_index=self._selected_chapter_index())
                 self._update_last_sample_path(event[3])
                 self.status_var.set(f"Sample ready: {event[3].name}")
+                self.progress_value_var.set(100.0)
+                self.progress_detail_var.set("100% complete")
                 messagebox.showinfo("Sample Ready", f"Sample created:\n{event[3]}", parent=self.root)
             elif kind == "chapter_done":
                 self._apply_project(event[1], event[2], selected_chapter_index=self._selected_chapter_index())
                 chapter_audio = event[3]
                 self.status_var.set("Selected chapter render finished.")
+                self.progress_value_var.set(100.0)
+                self.progress_detail_var.set("100% complete")
                 if chapter_audio is not None:
                     messagebox.showinfo("Chapter Ready", f"Chapter audio created:\n{chapter_audio}", parent=self.root)
             elif kind == "full_done":
                 self._apply_project(event[1], event[2], selected_chapter_index=self._selected_chapter_index())
                 self.status_var.set("Full conversion finished.")
+                self.progress_value_var.set(100.0)
+                self.progress_detail_var.set("100% complete")
                 messagebox.showinfo(
                     "Conversion Complete",
                     f"Finished rendering {len(event[2].chapters)} chapters.\n\nProject folder:\n{event[1]}",
@@ -687,11 +723,16 @@ class Book2AudioGUI:
                 self._queue_log(event[1])
             elif kind == "error":
                 self.status_var.set("The last task failed. See the activity log for details.")
+                self.progress_value_var.set(0.0)
+                self.progress_detail_var.set("Task failed")
                 self._queue_log(event[1])
                 self._queue_log(event[2])
                 messagebox.showerror("Task Failed", event[1], parent=self.root)
             elif kind == "idle":
                 self.busy = False
+                self.task_started_at = None
+                if self.progress_value_var.get() < 100.0:
+                    self._reset_progress_display()
                 self._set_controls_enabled(True)
 
         self.root.after(150, self._poll_events)
@@ -739,6 +780,52 @@ class Book2AudioGUI:
         else:
             self.voice_preview_var.set(f"Built-in preview ready: {preview_path.name}")
         self._update_last_sample_path()
+        self._refresh_project_runtime_estimate()
+
+    def _on_estimation_inputs_changed(self, *_args: object) -> None:
+        self._refresh_project_runtime_estimate()
+
+    def _apply_render_progress(self, progress: RenderProgress) -> None:
+        self.progress_value_var.set(progress.percent)
+        self.status_var.set(progress.message)
+        self.progress_detail_var.set(self._format_progress_detail(progress))
+
+    def _format_progress_detail(self, progress: RenderProgress) -> str:
+        parts = [f"{progress.percent:.0f}%"]
+        if progress.total_chapters > 0 and progress.chapter_position > 0:
+            parts.append(f"Chapter {progress.chapter_position}/{progress.total_chapters}")
+        if progress.total_segments_in_chapter > 0 and progress.segment_index > 0:
+            parts.append(f"Segment {progress.segment_index}/{progress.total_segments_in_chapter}")
+
+        eta_text = self._estimate_eta_text(progress)
+        if eta_text is not None:
+            parts.append(f"ETA {eta_text}")
+        return " | ".join(parts)
+
+    def _estimate_eta_text(self, progress: RenderProgress) -> str | None:
+        if self.task_started_at is None:
+            return None
+        if progress.total_units <= 0 or progress.completed_units <= 0:
+            return None
+        if progress.completed_units >= progress.total_units:
+            return "00:00"
+
+        elapsed = max(0.0, monotonic() - self.task_started_at)
+        seconds_per_unit = elapsed / progress.completed_units
+        remaining_seconds = seconds_per_unit * (progress.total_units - progress.completed_units)
+        return self._format_duration_seconds(remaining_seconds)
+
+    def _format_duration_seconds(self, seconds: float) -> str:
+        total_seconds = max(0, int(round(seconds)))
+        minutes, seconds_part = divmod(total_seconds, 60)
+        hours, minutes_part = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes_part:02d}:{seconds_part:02d}"
+        return f"{minutes_part:02d}:{seconds_part:02d}"
+
+    def _reset_progress_display(self) -> None:
+        self.progress_value_var.set(0.0)
+        self.progress_detail_var.set("Idle")
 
     def _sync_left_scrollregion(self, _event: tk.Event[tk.Misc] | None = None) -> None:
         self.left_scroll_canvas.configure(scrollregion=self.left_scroll_canvas.bbox("all"))
@@ -775,7 +862,7 @@ class Book2AudioGUI:
         self.project_format_var.set(manifest.source_format)
         self.project_parser_var.set(manifest.parser_name)
         self.project_chapters_var.set(str(len(manifest.chapters)))
-        self.project_minutes_var.set(f"{manifest.total_estimated_minutes:.2f}")
+        self.project_minutes_var.set(f"{manifest.total_estimated_minutes:.2f} min")
 
         self.suspend_selection_events = True
         listbox_state = str(self.chapter_listbox.cget("state"))
@@ -809,6 +896,7 @@ class Book2AudioGUI:
             self.chapter_listbox.configure(state="disabled")
         self.suspend_selection_events = False
         self._update_last_sample_path()
+        self._refresh_project_runtime_estimate()
 
     def _on_chapter_selected(self, _event: tk.Event[tk.Misc] | None = None) -> None:
         if self.suspend_selection_events or not self.chapter_records:
@@ -1146,6 +1234,25 @@ class Book2AudioGUI:
             self.last_sample_var.set("No sample rendered yet")
         else:
             self.last_sample_var.set(self.last_sample_path.name)
+        self._refresh_project_runtime_estimate()
+
+    def _refresh_project_runtime_estimate(self) -> None:
+        if self.project_dir is None or self.manifest is None:
+            return
+
+        try:
+            speed = float(self.speed_var.get())
+        except (tk.TclError, ValueError):
+            speed = 1.0
+
+        voice_id = self._selected_voice_id() or "default"
+        estimate = estimate_project_runtime(
+            self.project_dir,
+            self.manifest,
+            voice=voice_id,
+            speed=speed,
+        )
+        self.project_minutes_var.set(estimate.label)
 
     def _expected_sample_path(self) -> Path | None:
         if self.project_dir is None or self.active_chapter_index is None:

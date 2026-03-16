@@ -296,6 +296,7 @@ def convert(
                 sample_chars=sample_chars,
                 sample_rate=sample_rate,
                 overwrite=overwrite,
+                sample_metadata={"voice": voice, "speed": kokoro_speed},
             )
             console.print(f"[bold green]Project:[/bold green] {project_dir}")
             console.print(f"[bold green]Sample:[/bold green] {sample_path}")

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from book2audio.gui import Book2AudioGUI, RenderSettings
+from book2audio.render import RenderProgress
 from book2audio.pipeline import ingest_book
 
 
@@ -62,6 +63,38 @@ class GuiTests(unittest.TestCase):
 
             self.assertIsInstance(app.left_scroll_canvas, tk.Canvas)
             self.assertEqual(str(app.left_scrollbar.cget("orient")), "vertical")
+        finally:
+            root.destroy()
+
+    def test_apply_render_progress_updates_status_strip(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            with patch.object(Book2AudioGUI, "_start_task", lambda self, status_text, worker: None):
+                app = Book2AudioGUI(root)
+
+            app.task_started_at = 0.0
+            with patch("book2audio.gui.monotonic", return_value=10.0):
+                app._apply_render_progress(
+                    RenderProgress(
+                        phase="segment_complete",
+                        chapter_index=2,
+                        chapter_title="Example",
+                        chapter_position=2,
+                        total_chapters=5,
+                        segment_index=3,
+                        total_segments_in_chapter=8,
+                        completed_units=4,
+                        total_units=10,
+                        percent=40.0,
+                        message="Rendering chapter 2/5 segment 3/8: Example",
+                    )
+                )
+
+            self.assertEqual(app.progress_value_var.get(), 40.0)
+            self.assertIn("40%", app.progress_detail_var.get())
+            self.assertIn("Chapter 2/5", app.progress_detail_var.get())
+            self.assertIn("ETA", app.progress_detail_var.get())
         finally:
             root.destroy()
 

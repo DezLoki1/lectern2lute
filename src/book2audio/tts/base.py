@@ -19,6 +19,9 @@ class TTSBackend(ABC):
         """Short label for settings that change the audio, used to keep cached samples distinct."""
         return ""
 
+    def close(self) -> None:
+        """Release any long-lived resources, such as a worker process."""
+
     @abstractmethod
     def synthesize(
         self,
@@ -108,6 +111,9 @@ def build_backend(
     kokoro_lang_code: str = "a",
     kokoro_speed: float = 1.0,
     kokoro_split_pattern: str = r"\n+",
+    indextts_dir: Path | None = None,
+    indextts_lang: str = "EN",
+    indextts_speed: float = 1.0,
 ) -> TTSBackend:
     normalized = name.strip().lower()
     if normalized == "silence":
@@ -124,4 +130,8 @@ def build_backend(
             speed=kokoro_speed,
             split_pattern=kokoro_split_pattern,
         )
+    if normalized == "indextts":
+        from book2audio.tts.indextts_backend import IndexTTSBackend
+
+        return IndexTTSBackend(indextts_dir=indextts_dir, lang=indextts_lang, speed=indextts_speed)
     raise TTSBackendError(f"Unsupported backend: {name}")

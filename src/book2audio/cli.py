@@ -12,7 +12,8 @@ from book2audio.pipeline import ensure_project, ingest_book
 from book2audio.project import load_manifest
 from book2audio.render import render_project, render_sample
 from book2audio.tts import TTSBackendError, build_backend
-from book2audio.voices import list_kokoro_voices
+from book2audio.tts.indextts_backend import default_indextts_dir
+from book2audio.voices import find_indextts_voice, indextts_voice_dirs, list_indextts_voices, list_kokoro_voices
 
 app = typer.Typer(no_args_is_help=True, help="Local audiobook pipeline for DRM-free text sources.")
 console = Console()
@@ -115,6 +116,23 @@ def render(
         "--kokoro-split-pattern",
         help="Regex split pattern passed to Kokoro segmentation.",
     ),
+    indextts_dir: Path | None = typer.Option(
+        None,
+        "--indextts-dir",
+        help="IndexTTS checkout for --backend indextts. Defaults to $LECTERN2LUTE_INDEXTTS_DIR or an index-tts folder beside lectern2lute.",
+    ),
+    indextts_lang: str = typer.Option(
+        "EN",
+        "--indextts-lang",
+        help="IndexTTS-2.5 language: EN, ZH, JA, ES or AR.",
+    ),
+    indextts_speed: float = typer.Option(
+        1.0,
+        "--indextts-speed",
+        min=0.5,
+        max=2.0,
+        help="Speech rate for the IndexTTS backend.",
+    ),
     command_template: str | None = typer.Option(
         None,
         "--command-template",
@@ -140,6 +158,7 @@ def render(
     ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Regenerate existing chapter MP3 files."),
 ) -> None:
+    tts_backend = None
     try:
         tts_backend = build_backend(
             backend,
@@ -147,6 +166,9 @@ def render(
             kokoro_lang_code=kokoro_lang_code,
             kokoro_speed=kokoro_speed,
             kokoro_split_pattern=kokoro_split_pattern,
+            indextts_dir=indextts_dir,
+            indextts_lang=indextts_lang,
+            indextts_speed=indextts_speed,
         )
         manifest = render_project(
             project_dir,
@@ -160,6 +182,9 @@ def render(
     except (RuntimeError, TTSBackendError, ValueError) as exc:
         console.print(f"[bold red]Render failed:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
+    finally:
+        if tts_backend is not None:
+            tts_backend.close()
 
     rendered = [chapter.audio_path for chapter in manifest.chapters if chapter.audio_path]
     console.print(f"[bold green]Rendered chapters:[/bold green] {len(rendered)}")
@@ -175,7 +200,30 @@ def voices(
         "-l",
         help="Optional language code filter, such as a, b, j, or z.",
     ),
+    backend: str = typer.Option("kokoro", "--backend", help="List voices for kokoro or indextts."),
+    indextts_dir: Path | None = typer.Option(
+        None,
+        "--indextts-dir",
+        help="IndexTTS checkout. Defaults to $LECTERN2LUTE_INDEXTTS_DIR or an index-tts folder beside lectern2lute.",
+    ),
 ) -> None:
+    if backend.strip().lower() == "indextts":
+        voice_dirs = indextts_voice_dirs(indextts_dir or default_indextts_dir())
+        voice_list = list_indextts_voices(voice_dirs)
+        if not voice_list:
+            console.print(
+                "No IndexTTS voices found. Put short .wav clips in the `voices` folder, "
+                "or download the IndexTTS examples."
+            )
+            return
+        table = Table(title="IndexTTS Voices (reference clips)")
+        table.add_column("Voice")
+        table.add_column("Clip")
+        for voice_info in voice_list:
+            table.add_row(voice_info.voice, str(find_indextts_voice(voice_info.voice, voice_dirs)))
+        console.print(table)
+        return
+
     try:
         voice_list = list_kokoro_voices()
     except RuntimeError as exc:
@@ -304,6 +352,23 @@ def convert(
         "--kokoro-split-pattern",
         help="Regex split pattern passed to Kokoro segmentation.",
     ),
+    indextts_dir: Path | None = typer.Option(
+        None,
+        "--indextts-dir",
+        help="IndexTTS checkout for --backend indextts. Defaults to $LECTERN2LUTE_INDEXTTS_DIR or an index-tts folder beside lectern2lute.",
+    ),
+    indextts_lang: str = typer.Option(
+        "EN",
+        "--indextts-lang",
+        help="IndexTTS-2.5 language: EN, ZH, JA, ES or AR.",
+    ),
+    indextts_speed: float = typer.Option(
+        1.0,
+        "--indextts-speed",
+        min=0.5,
+        max=2.0,
+        help="Speech rate for the IndexTTS backend.",
+    ),
     command_template: str | None = typer.Option(
         None,
         "--command-template",
@@ -330,6 +395,8 @@ def convert(
     else:
         project_dir, manifest = ensure_project(source, output_root, overwrite=overwrite)
 
+    tts_backend = None
+    speed = indextts_speed if backend.strip().lower() == "indextts" else kokoro_speed
     try:
         tts_backend = build_backend(
             backend,
@@ -337,6 +404,9 @@ def convert(
             kokoro_lang_code=kokoro_lang_code,
             kokoro_speed=kokoro_speed,
             kokoro_split_pattern=kokoro_split_pattern,
+            indextts_dir=indextts_dir,
+            indextts_lang=indextts_lang,
+            indextts_speed=indextts_speed,
         )
         if mode is ConvertMode.sample:
             sample_path = render_sample(
@@ -347,7 +417,7 @@ def convert(
                 sample_chars=sample_chars,
                 sample_rate=sample_rate,
                 overwrite=overwrite,
-                sample_metadata={"voice": voice, "speed": kokoro_speed},
+                sample_metadata={"voice": voice, "speed": speed},
             )
             console.print(f"[bold green]Project:[/bold green] {project_dir}")
             console.print(f"[bold green]Sample:[/bold green] {sample_path}")
@@ -369,6 +439,9 @@ def convert(
     except (RuntimeError, TTSBackendError, ValueError) as exc:
         console.print(f"[bold red]Convert failed:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
+    finally:
+        if tts_backend is not None:
+            tts_backend.close()
 
     console.print(f"[bold green]Project:[/bold green] {project_dir}")
     console.print(f"[bold green]Rendered chapters:[/bold green] {len(manifest.chapters)}")

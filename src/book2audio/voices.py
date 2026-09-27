@@ -11,6 +11,8 @@ class VoiceInfo:
     language: str
 
 
+CLONED_VOICE_LANGUAGE = "Cloned voice"
+
 FALLBACK_KOKORO_VOICES: tuple[tuple[str, str], ...] = (
     ("af_alloy", "a"),
     ("af_aoede", "a"),
@@ -99,6 +101,8 @@ def humanize_voice_id(voice: str) -> str:
 
 
 def friendly_voice_label(voice_info: VoiceInfo) -> str:
+    if voice_info.language == CLONED_VOICE_LANGUAGE:
+        return f"{voice_info.voice.replace('_', ' ').replace('-', ' ').title()} ({voice_info.language})"
     return f"{humanize_voice_id(voice_info.voice)} ({voice_info.language})"
 
 
@@ -141,3 +145,34 @@ def list_kokoro_voices(repo_id: str = "hexgrad/Kokoro-82M") -> list[VoiceInfo]:
         )
         for voice in voices
     ]
+
+
+INDEXTTS_VOICE_SUFFIXES = (".wav", ".mp3", ".flac")
+
+
+def indextts_voice_dirs(indextts_dir: Path, app_root: Path | None = None) -> list[Path]:
+    """Folders searched for IndexTTS reference clips: the app's `voices` folder first, then IndexTTS examples."""
+    base_root = app_root or Path(__file__).resolve().parents[2]
+    return [path for path in (base_root / "voices", Path(indextts_dir) / "examples") if path.is_dir()]
+
+
+def _indextts_voice_files(voice_dirs: list[Path]) -> dict[str, Path]:
+    found: dict[str, Path] = {}
+    for folder in voice_dirs:
+        for path in sorted(folder.iterdir()):
+            # IndexTTS ships emotion reference clips (emo_*.wav) beside its voices; they aren't narrators.
+            if path.suffix.lower() not in INDEXTTS_VOICE_SUFFIXES or path.stem.startswith("emo_"):
+                continue
+            found.setdefault(path.stem, path)
+    return found
+
+
+def list_indextts_voices(voice_dirs: list[Path]) -> list[VoiceInfo]:
+    return [
+        VoiceInfo(voice=name, language_code="en", language=CLONED_VOICE_LANGUAGE)
+        for name in sorted(_indextts_voice_files(voice_dirs))
+    ]
+
+
+def find_indextts_voice(voice: str, voice_dirs: list[Path]) -> Path | None:
+    return _indextts_voice_files(voice_dirs).get(voice)

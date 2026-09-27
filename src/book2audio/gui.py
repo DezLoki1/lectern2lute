@@ -35,12 +35,16 @@ from book2audio.render import (
     render_sample,
     sample_file_stem,
 )
-from book2audio.tts import build_backend
+from book2audio.tts import TTSBackend, build_backend
+from book2audio.tts.indextts_backend import default_indextts_dir, indextts_settings_tag
 from book2audio.tts.kokoro_backend import kokoro_settings_tag
 from book2audio.voices import (
     VoiceInfo,
+    find_indextts_voice,
     friendly_voice_label,
     get_voice_sample_path,
+    indextts_voice_dirs,
+    list_indextts_voices,
     list_kokoro_voices,
 )
 
@@ -54,6 +58,9 @@ SUPPORTED_FILE_TYPES = [
     ("Markdown", "*.md"),
     ("All files", "*.*"),
 ]
+ENGINE_KOKORO = "Kokoro (fast)"
+ENGINE_INDEXTTS = "IndexTTS-2.5 (expressive, GPU)"
+ENGINES = (ENGINE_KOKORO, ENGINE_INDEXTTS)
 
 
 @dataclass(slots=True)
@@ -69,6 +76,7 @@ class RenderSettings:
     current_project_dir: Path | None = None
     current_project_source: Path | None = None
     force_rebuild: bool = False
+    engine: str = ENGINE_KOKORO
 
 
 class Book2AudioGUI:
@@ -92,10 +100,14 @@ class Book2AudioGUI:
         self.render_controller: RenderController | None = None
         self.render_pause_requested = False
         self.preserve_progress_on_idle = False
+        self._indextts_backend: TTSBackend | None = None
+        self._indextts_backend_dir: Path | None = None
 
         self.source_var = tk.StringVar()
         self.output_root_var = tk.StringVar(value=str(DEFAULT_OUTPUT_ROOT))
         self.voice_display_var = tk.StringVar()
+        self.engine_var = tk.StringVar(value=ENGINE_KOKORO)
+        self.indextts_dir_var = tk.StringVar(value=str(default_indextts_dir()))
         self.voice_id_var = tk.StringVar(value="af_heart")
         self.voice_language_var = tk.StringVar(value="-")
         self.voice_preview_var = tk.StringVar(value="Built-in preview: checking...")
@@ -132,7 +144,7 @@ class Book2AudioGUI:
         self.voice_display_var.trace_add("write", self._on_estimation_inputs_changed)
         self._set_controls_enabled(True)
         self._queue_log("Loading available voices...")
-        self._start_task("Loading Kokoro voices...", self._load_voices_worker)
+        self._start_task("Loading voices...", self._load_voices_worker)
         self.root.after(150, self._poll_events)
 
     def _build_ui(self) -> None:
@@ -240,12 +252,29 @@ class Book2AudioGUI:
         voice_frame.columnconfigure(0, weight=1)
         voice_frame.columnconfigure(1, weight=1)
 
+        engine_frame = ttk.Frame(voice_frame)
+        engine_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+        engine_frame.columnconfigure(0, weight=1)
         ttk.Label(
-            voice_frame,
+            engine_frame,
             text="Pick the narrator voice, tune the speed, and preview either the built-in voice sample or your generated sample.",
             wraplength=350,
             justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(engine_frame, text="Voice engine").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.engine_combo = ttk.Combobox(
+            engine_frame,
+            textvariable=self.engine_var,
+            values=ENGINES,
+            state="readonly",
+        )
+        self.engine_combo.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.engine_combo.bind("<<ComboboxSelected>>", self._on_engine_selected)
+        ttk.Label(engine_frame, text="IndexTTS folder").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.indextts_dir_entry = ttk.Entry(engine_frame, textvariable=self.indextts_dir_var)
+        self.indextts_dir_entry.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        self.browse_indextts_button = ttk.Button(engine_frame, text="Browse...", command=self._browse_indextts_dir)
+        self.browse_indextts_button.grid(row=4, column=1, padx=(8, 0), pady=(4, 0))
 
         ttk.Label(voice_frame, text="Narrator voice").grid(row=1, column=0, sticky="w", pady=(10, 0))
         self.voice_combo = ttk.Combobox(
@@ -470,7 +499,7 @@ class Book2AudioGUI:
             self.output_root_var.set(selected)
 
     def _refresh_voices(self) -> None:
-        self._start_task("Refreshing Kokoro voices...", self._load_voices_worker)
+        self._start_task("Refreshing voices...", self._load_voices_worker)
 
     def _prepare_project(self) -> None:
         try:
@@ -631,6 +660,7 @@ class Book2AudioGUI:
             voice=voice_id,
             language_code=language_code,
             speed=speed,
+            engine=self.engine_var.get(),
             sample_chars=sample_chars,
             selected_chapter_index=self._selected_chapter_index(),
             overwrite_audio=bool(self.overwrite_var.get()),
@@ -673,10 +703,65 @@ class Book2AudioGUI:
         finally:
             self.events.put(("idle", None))
 
+    def _is_indextts(self) -> bool:
+        return self.engine_var.get() == ENGINE_INDEXTTS
+
+    def _indextts_dir(self) -> Path:
+        text = self.indextts_dir_var.get().strip()
+        return Path(text).expanduser().resolve() if text else default_indextts_dir()
+
     def _load_voices_worker(self) -> None:
+        if self._is_indextts():
+            voices = list_indextts_voices(indextts_voice_dirs(self._indextts_dir(), APP_ROOT))
+            self.events.put(("voices_loaded", voices))
+            if voices:
+                self.events.put(("log", f"Loaded {len(voices)} IndexTTS reference voices."))
+            else:
+                self.events.put(
+                    ("log", "No IndexTTS voices found. Put short .wav clips in the voices folder beside lectern2lute.")
+                )
+            return
         voices = list_kokoro_voices()
         self.events.put(("voices_loaded", voices))
         self.events.put(("log", f"Loaded {len(voices)} Kokoro voices."))
+
+    def _build_render_backend(self, settings: RenderSettings) -> TTSBackend:
+        if settings.engine != ENGINE_INDEXTTS:
+            return build_backend(
+                "kokoro",
+                kokoro_lang_code=settings.language_code,
+                kokoro_speed=settings.speed,
+                kokoro_split_pattern=r"\n+",
+            )
+        # Keep one IndexTTS worker alive between renders so the model only loads once.
+        indextts_dir = self._indextts_dir()
+        if self._indextts_backend is None or self._indextts_backend_dir != indextts_dir:
+            if self._indextts_backend is not None:
+                self._indextts_backend.close()
+            self._indextts_backend = build_backend("indextts", indextts_dir=indextts_dir)
+            self._indextts_backend_dir = indextts_dir
+            self.events.put(("log", "Loading IndexTTS-2.5. The first sample takes a while as the model loads."))
+        self._indextts_backend.speed = settings.speed
+        return self._indextts_backend
+
+    def _on_engine_selected(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        self._refresh_voices()
+
+    def _browse_indextts_dir(self) -> None:
+        selected = filedialog.askdirectory(
+            title="Choose your IndexTTS folder",
+            initialdir=str(self._indextts_dir().parent),
+            parent=self.root,
+        )
+        if selected:
+            self.indextts_dir_var.set(selected)
+            if self._is_indextts():
+                self._refresh_voices()
+
+    def _voice_preview_path(self, voice_id: str) -> Path | None:
+        if self._is_indextts():
+            return find_indextts_voice(voice_id, indextts_voice_dirs(self._indextts_dir(), APP_ROOT))
+        return get_voice_sample_path(voice_id, APP_ROOT)
 
     def _prepare_project_worker(self, settings: RenderSettings) -> None:
         project_dir, manifest = self._resolve_project(settings, allow_reingest=settings.force_rebuild)
@@ -686,12 +771,7 @@ class Book2AudioGUI:
 
     def _render_sample_worker(self, settings: RenderSettings, controller: RenderController) -> None:
         project_dir, _manifest = self._resolve_project(settings, allow_reingest=False)
-        backend = build_backend(
-            "kokoro",
-            kokoro_lang_code=settings.language_code,
-            kokoro_speed=settings.speed,
-            kokoro_split_pattern=r"\n+",
-        )
+        backend = self._build_render_backend(settings)
         sample_path = render_sample(
             project_dir,
             backend,
@@ -710,12 +790,7 @@ class Book2AudioGUI:
 
     def _render_selected_chapter_worker(self, settings: RenderSettings, controller: RenderController) -> None:
         project_dir, _manifest = self._resolve_project(settings, allow_reingest=False)
-        backend = build_backend(
-            "kokoro",
-            kokoro_lang_code=settings.language_code,
-            kokoro_speed=settings.speed,
-            kokoro_split_pattern=r"\n+",
-        )
+        backend = self._build_render_backend(settings)
         updated_manifest = render_project(
             project_dir,
             backend,
@@ -734,12 +809,7 @@ class Book2AudioGUI:
 
     def _render_full_worker(self, settings: RenderSettings, controller: RenderController) -> None:
         project_dir, _manifest = self._resolve_project(settings, allow_reingest=False)
-        backend = build_backend(
-            "kokoro",
-            kokoro_lang_code=settings.language_code,
-            kokoro_speed=settings.speed,
-            kokoro_split_pattern=r"\n+",
-        )
+        backend = self._build_render_backend(settings)
         updated_manifest = render_project(
             project_dir,
             backend,
@@ -868,8 +938,11 @@ class Book2AudioGUI:
 
         self.voice_combo["values"] = labels
         selected_voice = self.voice_id_var.get()
-        if selected_voice not in self.voice_lookup and sorted_voices:
-            selected_voice = "af_heart" if "af_heart" in self.voice_lookup else sorted_voices[0].voice
+        if selected_voice not in self.voice_lookup:
+            if not sorted_voices:
+                selected_voice = ""
+            else:
+                selected_voice = "af_heart" if "af_heart" in self.voice_lookup else sorted_voices[0].voice
         self.voice_id_var.set(selected_voice)
         self.voice_display_var.set(self.voice_id_to_label.get(selected_voice, ""))
         self._sync_voice_metadata()
@@ -888,7 +961,7 @@ class Book2AudioGUI:
         else:
             self.voice_language_var.set("-")
 
-        preview_path = None if not selected_voice else get_voice_sample_path(selected_voice, APP_ROOT)
+        preview_path = None if not selected_voice else self._voice_preview_path(selected_voice)
         if preview_path is None:
             self.voice_preview_var.set("Built-in preview: not found. You can still render your own sample from the book.")
         else:
@@ -1392,7 +1465,8 @@ class Book2AudioGUI:
             speed = float(self.speed_var.get())
         except (tk.TclError, ValueError):
             speed = 1.0
-        stem = sample_file_stem(chapter.index, chapter.slug, voice_id, kokoro_settings_tag(speed))
+        settings_tag = indextts_settings_tag(speed) if self._is_indextts() else kokoro_settings_tag(speed)
+        stem = sample_file_stem(chapter.index, chapter.slug, voice_id, settings_tag)
         sample_path = self.project_dir / "samples" / f"{stem}.mp3"
         if sample_path.exists():
             return sample_path
@@ -1404,7 +1478,7 @@ class Book2AudioGUI:
             messagebox.showinfo("No Voice", "Choose a voice first.", parent=self.root)
             return
 
-        preview_path = get_voice_sample_path(voice_id, APP_ROOT)
+        preview_path = self._voice_preview_path(voice_id)
         if preview_path is None:
             messagebox.showinfo(
                 "Preview Not Found",
@@ -1456,6 +1530,9 @@ class Book2AudioGUI:
         self.source_entry.configure(state=state)
         self.output_entry.configure(state=state)
         self.voice_combo.configure(state=readonly)
+        self.engine_combo.configure(state=readonly)
+        self.indextts_dir_entry.configure(state=state)
+        self.browse_indextts_button.configure(state=state)
         self.speed_spinbox.configure(state=state)
         self.sample_chars_spinbox.configure(state=state)
         self.browse_source_button.configure(state=state)
@@ -1499,6 +1576,8 @@ class Book2AudioGUI:
             self.audio_player.stop()
         except AudioPlayerError:
             pass
+        if self._indextts_backend is not None:
+            self._indextts_backend.close()
         self.root.destroy()
 
 

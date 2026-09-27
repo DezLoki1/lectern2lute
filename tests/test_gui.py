@@ -14,7 +14,7 @@ try:
 except tk.TclError as exc:
     raise unittest.SkipTest(f"no display available for Tk: {exc}")
 
-from book2audio.gui import Book2AudioGUI, RenderSettings
+from book2audio.gui import ENGINE_INDEXTTS, Book2AudioGUI, RenderSettings
 from book2audio.render import RenderController, RenderProgress
 from book2audio.pipeline import ingest_book
 
@@ -131,6 +131,48 @@ class GuiTests(unittest.TestCase):
             self.assertIn("ETA", app.progress_detail_var.get())
         finally:
             root.destroy()
+
+    def test_indextts_engine_lists_reference_clips_and_reuses_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            indextts_dir = Path(temp_dir) / "index-tts"
+            (indextts_dir / "examples").mkdir(parents=True)
+            (indextts_dir / "examples" / "voice_03.wav").write_bytes(b"RIFF")
+            (indextts_dir / "examples" / "emo_hate.wav").write_bytes(b"RIFF")
+
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with patch.object(Book2AudioGUI, "_start_task", lambda self, status_text, worker: None):
+                    app = Book2AudioGUI(root)
+                app.engine_var.set(ENGINE_INDEXTTS)
+                app.indextts_dir_var.set(str(indextts_dir))
+                app._load_voices_worker()
+                kind, voices = app.events.get_nowait()
+                self.assertEqual(kind, "voices_loaded")
+                app._apply_voice_list(voices)
+
+                self.assertEqual(app._selected_voice_id(), "voice_03")
+                self.assertEqual(app._voice_preview_path("voice_03"), indextts_dir / "examples" / "voice_03.wav")
+
+                settings = RenderSettings(
+                    source_path=Path(temp_dir) / "book.txt",
+                    output_root=Path(temp_dir),
+                    voice="voice_03",
+                    language_code="en",
+                    speed=1.1,
+                    sample_chars=650,
+                    selected_chapter_index=1,
+                    overwrite_audio=False,
+                    engine=ENGINE_INDEXTTS,
+                )
+                first = app._build_render_backend(settings)
+                settings.speed = 0.9
+                second = app._build_render_backend(settings)
+                self.assertIs(first, second)
+                self.assertEqual(first.name, "indextts")
+                self.assertEqual(second.speed, 0.9)
+            finally:
+                root.destroy()
 
     def test_resolve_project_uses_reingest_when_rebuild_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

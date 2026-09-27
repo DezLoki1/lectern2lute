@@ -7,6 +7,10 @@ from typing import Any
 from book2audio.tts.base import TTSBackend, TTSBackendError
 
 
+def kokoro_settings_tag(speed: float) -> str:
+    return f"{speed:g}x"
+
+
 class KokoroBackend(TTSBackend):
     name = "kokoro"
     output_sample_rate = 24000
@@ -28,7 +32,7 @@ class KokoroBackend(TTSBackend):
         self._pipeline: Any | None = None
 
     def settings_tag(self) -> str:
-        return f"{self.speed:g}x"
+        return kokoro_settings_tag(self.speed)
 
     def synthesize(
         self,

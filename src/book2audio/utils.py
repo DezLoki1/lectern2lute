@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 import unicodedata
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +21,15 @@ def word_count(text: str) -> int:
     return len(re.findall(r"\b[\w'-]+\b", text))
 
 
-def estimate_minutes(text: str, words_per_minute: int = 165) -> float:
-    words = word_count(text)
-    if words == 0:
+def estimate_minutes(text: str, words_per_minute: int = 165, speed: float = 1.0) -> float:
+    return estimate_minutes_from_word_count(word_count(text), words_per_minute=words_per_minute, speed=speed)
+
+
+def estimate_minutes_from_word_count(word_total: int, words_per_minute: int = 165, speed: float = 1.0) -> float:
+    if word_total <= 0:
         return 0.0
-    return round(words / words_per_minute, 2)
+    adjusted_wpm = max(1.0, words_per_minute * max(speed, 0.1))
+    return round(word_total / adjusted_wpm, 2)
 
 
 def sha256_file(path: Path) -> str:
@@ -41,6 +47,45 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def probe_audio_duration_seconds(path: Path) -> float | None:
+    if not path.exists():
+        return None
+
+    if path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as wav_file:
+                frames = wav_file.getnframes()
+                framerate = wav_file.getframerate()
+                if framerate <= 0:
+                    return None
+                return frames / framerate
+        except (wave.Error, OSError):
+            return None
+
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return None
 
 
 def unique_directory(root: Path, slug: str, overwrite: bool = False) -> Path:

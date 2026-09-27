@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "book2audio"
+name = "lectern2lute"
 version = "0.1.0"
 description = "Local audiobook pipeline for PDF, EPUB, TXT, and Markdown sources."
 readme = "README.md"
@@ -27,8 +27,8 @@ kokoro = [
 ]
 
 [project.scripts]
-book2audio = "book2audio.cli:main"
-book2audio-gui = "book2audio.gui:main"
+lectern2lute = "book2audio.cli:main"
+lectern2lute-gui = "book2audio.gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

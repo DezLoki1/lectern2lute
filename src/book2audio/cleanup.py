@@ -5,24 +5,26 @@ import re
 _NUMBER_WORD = (
     r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen"
     r"|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty"
-    r"|seventy|eighty|ninety|hundred)"
+    r"|seventy|eighty|ninety|hundred"
+    r"|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth"
+    r"|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth)"
 )
 # After a heading label: nothing, or a separator and a subtitle ("Chapter IV: The Storm").
 _HEADING_END = r"(?:\s*[.:-]?\s*$|\s*[.:-]\s*\S.*$)"
 
 # A keyword alone isn't enough, or prose lines like "Part of me wanted..." would split
-# chapters. Require a number or a bare keyword. A subtitle with no separator is only
-# allowed after digits and must not start lowercase, which excludes "Chapter 3 explains...".
+# chapters. Require a designator (number, numeral, letter) or a bare keyword. A subtitle
+# with no separator is only allowed after digits and must not start lowercase, which
+# excludes "Chapter 3 explains...".
 CHAPTER_HEADING_RE = re.compile(
     rf"""
     ^(?:
-        (?:chapter|part|book)[\s.:-]+
+        (?:chapter|part|book|section|appendix)[\s.:-]+
         (?:
             \d+(?:{_HEADING_END}|\s+(?-i:[^\sa-z]).*$)
-          | (?:[ivxlcdm]+|{_NUMBER_WORD}(?:[\s-]{_NUMBER_WORD})*){_HEADING_END}
+          | (?:[ivxlcdm]+|[a-z]|{_NUMBER_WORD}(?:[\s-]{_NUMBER_WORD})*){_HEADING_END}
         )
-      | appendix[\s.:-]+(?:\d+|[a-z]|[ivxlcdm]+){_HEADING_END}
-      | (?:prologue|epilogue|foreword|afterword){_HEADING_END}
+      | (?:chapter|appendix|prologue|epilogue|foreword|afterword|interlude){_HEADING_END}
     )
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -57,7 +59,7 @@ def normalize_text(text: str) -> str:
     return normalized.strip()
 
 
-def is_chapter_heading(line: str) -> bool:
+def is_explicit_heading(line: str) -> bool:
     stripped = line.strip()
     if not stripped or len(stripped) > MAX_HEADING_CHARS or stripped.endswith(","):
         return False
@@ -128,7 +130,7 @@ def merge_wrapped_lines(text: str) -> str:
                 current = ""
             continue
 
-        if is_chapter_heading(stripped):
+        if is_explicit_heading(stripped):
             if current:
                 paragraphs.append(current.strip())
                 current = ""

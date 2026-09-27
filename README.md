@@ -19,11 +19,10 @@ The project already supports:
 - previewing raw or cleaned chapter text
 - render planning and chapter export with a pluggable backend
 - a built-in `kokoro` backend for local speech generation
+- a built-in `indextts` backend for expressive, voice-cloned narration with IndexTTS-2.5 (NVIDIA GPU)
 - a built-in `silence` backend for smoke testing the audio pipeline end to end
 - a `command` backend for wiring other local TTS engines later
 - a basic Windows GUI for source selection, chapter preview, voice selection, sample renders, and full conversion
-
-The project does not yet ship a built-in Higgs adapter. The backend boundary is in place so we can add one cleanly next.
 
 ## Project layout
 
@@ -158,6 +157,47 @@ lectern2lute render .\projects\example `
 
 The official Kokoro examples use `KPipeline(lang_code='a')` and voices such as `af_heart`. Make sure the language code matches the voice family you choose.
 
+### Render with IndexTTS-2.5
+
+IndexTTS-2.5 sounds more expressive than Kokoro but needs an NVIDIA GPU (about 6 GB of VRAM with BF16) and is much slower. It has no preset voices: it clones the narrator from a short reference clip.
+
+IndexTTS pins its own versions of PyTorch and friends, so it lives in its own folder and environment. lectern2lute starts it as a background worker, loads the model once, and reuses it for every segment.
+
+One-time setup, run next to your `lectern2lute` folder:
+
+```powershell
+py -m pip install -U uv
+git clone https://github.com/index-tts/index-tts.git
+cd index-tts
+uv sync
+uv tool install "huggingface-hub"
+hf download IndexTeam/IndexTTS-2.5 --local-dir=checkpoints
+uv run tools/gpu_check.py
+```
+
+Skip `--all-extras` on Windows; DeepSpeed is hard to install there and isn't needed. IndexTTS installs PyTorch built for CUDA 12.8, which RTX 50-series cards require.
+
+If you put IndexTTS somewhere else, set `LECTERN2LUTE_INDEXTTS_DIR` or pass `--indextts-dir`.
+
+Voices are audio clips. lectern2lute looks in two places, in this order:
+
+- a `voices` folder inside `lectern2lute` for your own clips: a clean 5-15 second `.wav` of one speaker, named after the voice id you want (`voices\narrator.wav` becomes `--voice narrator`)
+- `index-tts\examples`, which you can fill with the IndexTTS demo voices:
+
+```powershell
+cd index-tts
+uv run python -c "from indextts.utils.examples_downloader import ensure_examples_available; ensure_examples_available()"
+```
+
+Only clone voices you have permission to use.
+
+```powershell
+lectern2lute voices --backend indextts
+lectern2lute convert .\books\example.epub --backend indextts --voice narrator --mode sample
+```
+
+In the GUI, switch **Voice engine** to IndexTTS-2.5. The first sample takes a while because the model has to load. Worker output is logged to `lectern2lute-indextts.log` in your temp folder.
+
 ### Export a finished project to M4B
 
 After the full chapter render is done, wrap the chapter MP3 files into a single `.m4b` audiobook with embedded chapter markers:
@@ -197,6 +237,6 @@ Available placeholders:
 ## Next steps
 
 - add pronunciation override dictionaries
-- add a first-class Higgs backend once the local integration target is clearer
+- add IndexTTS emotion controls (emotion reference clips or per-passage emotion text)
 - add OCR as an optional separate pipeline
 - add a GUI shell on top of the same backend

@@ -18,7 +18,7 @@ class EpubParser(DocumentParser):
         title = self._read_title(book) or input_path.stem
         sections: list[SourceSection] = []
 
-        for item in book.get_items():
+        for item in self._reading_order(book):
             if item.get_type() != ebooklib.ITEM_DOCUMENT:
                 continue
 
@@ -55,6 +55,17 @@ class EpubParser(DocumentParser):
             parser_name=self.__class__.__name__,
             sections=sections,
         )
+
+    @staticmethod
+    def _reading_order(book: epub.EpubBook) -> list[epub.EpubItem]:
+        # Manifest order (get_items) isn't guaranteed to match reading order; the spine is.
+        ordered: list[epub.EpubItem] = []
+        for entry in book.spine:
+            item_id = entry[0] if isinstance(entry, tuple) else entry
+            item = book.get_item_with_id(item_id)
+            if item is not None:
+                ordered.append(item)
+        return ordered or list(book.get_items())
 
     @staticmethod
     def _read_title(book: epub.EpubBook) -> str | None:

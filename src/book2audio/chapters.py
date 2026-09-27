@@ -1,17 +1,9 @@
 from __future__ import annotations
 
-import re
-
-from book2audio.cleanup import clean_text_for_tts, normalize_text, normalize_title
+from book2audio.cleanup import clean_text_for_tts, is_chapter_heading, normalize_text, normalize_title
 from book2audio.models import ChapterDraft, ParsedDocument, SourceSection
 from book2audio.utils import slugify, word_count
 
-CHAPTER_HEADING_RE = re.compile(
-    r"^(?:"
-    r"chapter|part|book|prologue|epilogue|foreword|afterword|appendix"
-    r")\b(?:[\s:.-]+[a-z0-9ivxlcdm-]+.*)?$",
-    re.IGNORECASE,
-)
 SKIP_SECTION_TITLES = {"contents", "table of contents"}
 
 
@@ -48,13 +40,6 @@ def build_chapters(document: ParsedDocument) -> list[ChapterDraft]:
         for index, draft in enumerate(drafts, start=1)
         if draft.raw_text.strip()
     ]
-
-
-def is_chapter_heading(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped:
-        return False
-    return bool(CHAPTER_HEADING_RE.match(stripped))
 
 
 def _looks_structured(document: ParsedDocument, sections: list[SourceSection]) -> bool:

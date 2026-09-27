@@ -1,8 +1,18 @@
 import tempfile
-import tkinter as tk
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+try:
+    import tkinter as tk
+except ImportError as exc:
+    raise unittest.SkipTest(f"tkinter not available: {exc}")
+
+# Headless machines without a display (or xvfb) can't create a Tk root.
+try:
+    tk.Tk().destroy()
+except tk.TclError as exc:
+    raise unittest.SkipTest(f"no display available for Tk: {exc}")
 
 from book2audio.gui import Book2AudioGUI, RenderSettings
 from book2audio.render import RenderController, RenderProgress

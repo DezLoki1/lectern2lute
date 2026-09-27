@@ -15,6 +15,10 @@ class TTSBackendError(RuntimeError):
 class TTSBackend(ABC):
     name: str
 
+    def settings_tag(self) -> str:
+        """Short label for settings that change the audio, used to keep cached samples distinct."""
+        return ""
+
     @abstractmethod
     def synthesize(
         self,

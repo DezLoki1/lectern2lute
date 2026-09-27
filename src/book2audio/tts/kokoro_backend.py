@@ -27,6 +27,9 @@ class KokoroBackend(TTSBackend):
         self.repo_id = repo_id
         self._pipeline: Any | None = None
 
+    def settings_tag(self) -> str:
+        return f"{self.speed:g}x"
+
     def synthesize(
         self,
         text: str,

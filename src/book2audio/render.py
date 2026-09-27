@@ -119,6 +119,9 @@ def render_sample(
     samples_dir = project_dir / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
     sample_stem = f"{chapter.index:03d}-{chapter.slug}-{voice}"
+    settings_tag = backend.settings_tag()
+    if settings_tag:
+        sample_stem = f"{sample_stem}-{settings_tag}"
     text_path = samples_dir / f"{sample_stem}.txt"
     wav_path = samples_dir / f"{sample_stem}.wav"
     mp3_path = samples_dir / f"{sample_stem}.mp3"
@@ -199,9 +202,7 @@ def extract_sample_text(text: str, max_chars: int = 650) -> str:
 
 def _concat_segments(segments: list[RenderSegment], output_mp3: Path) -> None:
     list_file = output_mp3.parent / "concat.txt"
-    concat_payload = "\n".join(
-        f"file '{Path(segment.audio_path).resolve().as_posix()}'" for segment in segments
-    )
+    concat_payload = "\n".join(_concat_file_line(Path(segment.audio_path)) for segment in segments)
     list_file.write_text(concat_payload + "\n", encoding="utf-8")
 
     result = subprocess.run(
@@ -230,6 +231,12 @@ def _concat_segments(segments: list[RenderSegment], output_mp3: Path) -> None:
             "ffmpeg failed while stitching chapter audio:\n"
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
+
+
+def _concat_file_line(path: Path) -> str:
+    # ffmpeg's concat format quotes with '...'; a literal quote is written as '\''.
+    escaped = path.resolve().as_posix().replace("'", "'\\''")
+    return f"file '{escaped}'"
 
 
 def _encode_wav_to_mp3(wav_path: Path, output_mp3: Path) -> None:

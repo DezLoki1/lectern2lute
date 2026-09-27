@@ -18,7 +18,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "huggingface_hub>=0.20",
     "pytest>=8.2",
 ]
 kokoro = [
